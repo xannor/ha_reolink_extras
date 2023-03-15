@@ -8,7 +8,7 @@ __pycache__
 
 # misc
 .coverage
-#.vscode
+.vscode
 coverage.xml
 
 
@@ -18,7 +18,7 @@ coverage.xml
 .storage
 automations.yaml
 blueprints
-#configuration.yaml
+configuration.yaml
 deps
 home-assistant_v2*
 home-assistant.log*

@@ -1,0 +1,13 @@
+{
+  "domain": "reolink_extras",
+  "name": "Reolink Extras",
+  "codeowners": [
+    "@xannor"
+  ],
+  "config_flow": true,
+  "dependencies": ["reolink"],
+  "documentation": "https://github.com/xannor/ha_reolink_extras",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/xannor/ha_reolink_extras/issues",
+  "version": "0.0.1"
+}

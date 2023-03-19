@@ -45,7 +45,9 @@ class _SearchDateRange(DateRange):
         start = datetime.date(status["year"], status["mon"], 1)
         end = datetime.date(*(_nextmonth(start.year, start.month) + (1,)))
         super().__init__(start, end)
-        self._days = tuple(i for i, flag in enumerate(status["table"], start=1) if flag)
+        self._days = tuple(
+            i for i, flag in enumerate(status["table"], start=1) if flag == "1"
+        )
 
     def __contains__(self, value: object):
         if not isinstance(value, datetime.date):
@@ -57,7 +59,7 @@ class _SearchDateRange(DateRange):
         return value.day in self._days
 
     def __getitem__(self, __index: SupportsIndex):
-        return self._start + (self._days[__index] - 1)
+        return self._start + datetime.timedelta(days=self._days[__index] - 1)
 
     def __len__(self):
         return len(self._days)

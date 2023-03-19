@@ -14,6 +14,7 @@ from typing import (
 from typing_extensions import (
     SupportsIndex,
     TypeVar,
+    Unpack,
 )
 
 if TYPE_CHECKING:
@@ -63,12 +64,16 @@ class _DstRule:
 
     def __init__(self, prefix: str, json: dict) -> None:
         for field in dataclasses.fields(self):
-            setattr(
+            object.__setattr__(
                 self,
                 field.name,
-                json.get(mangle_key(field.name, prefix, title_case=True)),
+                json.get(
+                    mangle_key(
+                        field.metadata.get("key", field.name), prefix, title_case=True
+                    )
+                ),
             )
-        self.weekday = (self.weekday + 1) % 7
+        object.__setattr__(self, "weekday", (self.weekday + 1) % 7)
 
     def datetime(self, year: int):
         """datetime"""
@@ -84,7 +89,7 @@ USING_KEY: Final = str()
 Dst = TypedDict(
     "Dst",
     {
-        "enabled": bool,
+        "enable": bool,
         "offset": int,
     },
 )
@@ -103,6 +108,8 @@ Time = TypedDict(
         "timeZone": int,
     },
 )
+
+GetTimeResponse = TypedDict("GetTimeResponse", {"Dst": Dst, "Time": Time})
 
 
 def json_to_datetime(
@@ -138,18 +145,30 @@ class Timezone(datetime.tzinfo):
     _cache: ClassVar[dict[(bool, int), "Timezone"]] = {}
     __slots__ = ("_hr_chg", "_ofs", "_start", "_end", "_point_cache")
 
+    @overload
     @staticmethod
     def get(dst: Dst, time: Time) -> "Timezone":
+        ...
+
+    @overload
+    @staticmethod
+    def get(**kwargs: Unpack[GetTimeResponse]) -> "Timezone":
+        ...
+
+    @staticmethod
+    def get(**kwargs: any) -> "Timezone":
         """Esnure single timezone instance"""
-        if dst is None:
+        dst: Dst = kwargs.get("Dst", kwargs.get("dst"))
+        time: Time = kwargs.get("Time", kwargs.get("time"))
+        if dst is None or time is None:
             return None
-        key = (dst["enabled"], time["timeZone"])
+        key = (dst["enable"], time["timeZone"])
         if t_z := Timezone._cache.get(key):
             return t_z
         return Timezone._cache.setdefault(key, Timezone(dst, time))
 
     def __init__(self, dst: Dst, time: Time):
-        self._hr_chg = dst["offset"]
+        self._hr_chg = datetime.timedelta(hours=dst["offset"])
         # Reolink does positive offest python expects a negative one
         self._ofs = datetime.timedelta(seconds=-time["timeZone"])
         self._start = _DstRule("start", dst)

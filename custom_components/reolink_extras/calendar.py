@@ -182,9 +182,11 @@ def _iter_file_event_cache(
 T = TypeVar("T", infer_variance=True)
 
 
-def _last(value: Sequence[T]):
+def _last(value: Iterable[T]):
     if len(value) == 0:
         return None
+    if not isinstance(value, Sequence):
+        value = list(value)
     return value[-1]
 
 
@@ -203,7 +205,6 @@ class ReolinkVODCalendar(ReolinkCoordinatorEntity, CalendarEntity):
         self.entity_description = entity_description
         self._status_cache: StatusCache = {}
         self._event_cache: FileEventCache = {}
-        self._hard_stop: datetime.date = None
 
         self._attr_unique_id = (
             f"{self._host.unique_id}_{self._channel}_{entity_description.key}"
@@ -215,10 +216,10 @@ class ReolinkVODCalendar(ReolinkCoordinatorEntity, CalendarEntity):
             (status_key := _last(self._status_cache.keys())) is not None
             and (status := self._status_cache[status_key])
             and (last := _last(status)) is not None
-            and (_list := self._status_cache[last])
+            and (_list := self._event_cache[last])
             and (entry := _last(_list))
         ):
-            return entry[0]
+            return entry[1]
         return None
 
     async def _async_fetch_events(

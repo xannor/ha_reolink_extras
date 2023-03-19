@@ -6,3 +6,6 @@ logger:
   default: info
   logs:
     custom_components.reolink_extras: debug
+
+debugpy:
+  # wait: true

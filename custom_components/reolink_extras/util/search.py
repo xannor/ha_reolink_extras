@@ -1,64 +1,68 @@
 """Search Utils"""
 
-import dataclasses
 import datetime
-from typing import Sequence
-from typing_extensions import SupportsIndex, Self
+from typing_extensions import SupportsIndex
 
-from reolink_aio.typings import SearchStatus, SearchFile
+from reolink_aio.typings import SearchStatus, SearchTime
 
-from .dt import DateTime
+from .dt import DateRange
+
+# pylint: disable=invalid-name
 
 
-@dataclasses.dataclass(frozen=True)
-class Status(Sequence[datetime.date]):
-    """Status"""
+def cmp(x: SearchTime | datetime.date, y: SearchTime | datetime.date):
+    """compare SearchTime and date/time"""
+    if isinstance(x, datetime.datetime):
+        x = (x.year, x.month, x.day, x.hour, x.minute, x.second)
+    elif isinstance(x, datetime.date):
+        x = (x.year, x.month, x.day)
+    else:
+        x = (x["year"], x["mon"], x["day"], x["hour"], x["min"], x["sec"])
 
-    month: int
-    days: tuple[int]
-    year: int
+    if isinstance(y, datetime.datetime):
+        y = (y.year, y.month, y.day, y.hour, y.minute, y.second)
+    elif isinstance(y, datetime.date):
+        y = (y.year, y.month, y.day)
+    else:
+        y = (y["year"], y["mon"], y["day"], y["hour"], y["min"], y["sec"])
 
-    def __getitem__(self, __x: SupportsIndex):
-        return datetime.date(self.year, self.month, self.days[__x])
+    if len(x) > len(y):
+        x = x[: len(y)]
+    elif len(y) > len(x):
+        y = y[: len(x)]
+
+    return 1 if x > y else 0 if x == y else -1
+
+
+def _nextmonth(year: int, month: int):
+    if month > 11:
+        year += 1
+    return (year, (month + 1 % 12) + 1)
+
+
+class _SearchDateRange(DateRange):
+    def __init__(self, status: SearchStatus):
+        start = datetime.date(status["year"], status["mon"], 1)
+        end = datetime.date(*(_nextmonth(start.year, start.month) + (1,)))
+        super().__init__(start, end)
+        self._days = tuple(i for i, flag in enumerate(status["table"], start=1) if flag)
+
+    def __contains__(self, value: object):
+        if not isinstance(value, datetime.date):
+            if isinstance(value, int):
+                return value in self._days
+            return False
+        if value.year != self._start.year or value.month != self._start.month:
+            return False
+        return value.day in self._days
+
+    def __getitem__(self, __index: SupportsIndex):
+        return self._start + (self._days[__index] - 1)
 
     def __len__(self):
-        return len(self.days)
-
-    @classmethod
-    def from_json(cls, json: SearchStatus) -> Self:
-        """Create value from JSON"""
-        return cls(
-            month=json.get("mon"),
-            days=(i for i, flag in enumerate(json.get("table", "")) if flag == "1"),
-            year=json.get("year"),
-        )
+        return len(self._days)
 
 
-@dataclasses.dataclass(frozen=True)
-class File:
-    """File"""
-
-    start_time: DateTime
-    end_time: DateTime
-    framerate: int
-    height: int
-    width: int
-    name: str
-    size: int
-    type: str
-
-    @classmethod
-    def from_json(cls, json: SearchFile) -> Self:
-        """Create value from JSON"""
-        if json is None:
-            return None
-        return File(
-            start_time=DateTime.from_json(json.get("StartTime")),
-            end_time=DateTime.from_json(json.get("EndTime")),
-            framerate=json.get("frameRate"),
-            height=json.get("height"),
-            width=json.get("width"),
-            name=json.get("name"),
-            size=json.get("size"),
-            type=json.get("type"),
-        )
+def iter_search_status(status: SearchStatus) -> DateRange:
+    """get DateRange of search status"""
+    return _SearchDateRange(status)

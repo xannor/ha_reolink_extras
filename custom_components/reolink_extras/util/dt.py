@@ -2,40 +2,33 @@
 
 import dataclasses
 import datetime
-from typing import ClassVar, Final, Sequence, TypedDict, overload
+from typing import (
+    TYPE_CHECKING,
+    ClassVar,
+    Final,
+    Generic,
+    Sequence,
+    TypedDict,
+    overload,
+)
 from typing_extensions import (
     SupportsIndex,
     TypeVar,
-    Unpack,
-    NotRequired,
-    Self,
-    TypeGuard,
 )
 
-
-class MangleArgs(TypedDict):
-    """mangle args"""
-
-    prefix: NotRequired[str]
-    suffix: NotRequired[str]
-    title_case: NotRequired[bool]
-
+if TYPE_CHECKING:
+    from typing import cast
 
 K = TypeVar("K", infer_variance=True, default=str)
 
 
-@overload
-def mangle_key(key: K, /, **kwargs: Unpack[MangleArgs]) -> K:
-    ...
-
-
 def mangle_key(
-    key: str,
+    key: K,
     /,
     prefix: str | None = None,
     suffix: str | None = None,
     title_case: bool | None = None,
-):
+) -> K:
     """mangle Key"""
     if prefix:
         if not key:
@@ -53,89 +46,114 @@ def mangle_key(
     return key
 
 
-def from_json(cls: type, json=None, **kwargs):
-    """Create dataclass from JSON"""
+Mangle = TypedDict(
+    "Mangle",
+    {"prefix": str | None, "suffix": str | None, "title_case": bool | None},
+    total=False,
+)
+
+
+@dataclasses.dataclass(frozen=True, init=False)
+class _DstRule:
+    month: int = dataclasses.field(metadata={"key": "mon"})
+    week: int
+    weekday: int
+    hour: int
+    minute: int = dataclasses.field(metadata={"key": "min"})
+
+    def __init__(self, prefix: str, json: dict) -> None:
+        for field in dataclasses.fields(self):
+            setattr(
+                self,
+                field.name,
+                json.get(mangle_key(field.name, prefix, title_case=True)),
+            )
+        self.weekday = (self.weekday + 1) % 7
+
+    def datetime(self, year: int):
+        """datetime"""
+        date = datetime.date(year, self.month, 1)
+        delta = datetime.timedelta(weeks=self.week, days=self.weekday)
+        delta -= datetime.timedelta(days=date.weekday())
+        date += delta
+        return datetime.datetime.combine(date, datetime.time(self.hour, self.minute))
+
+
+USING_KEY: Final = str()
+
+Dst = TypedDict(
+    "Dst",
+    {
+        "enabled": bool,
+        "offset": int,
+    },
+)
+
+Time = TypedDict(
+    "Time",
+    {
+        "year": int,
+        "mon": int,
+        "day": int,
+        "hour": int,
+        "min": int,
+        "sec": int,
+        "hourFmt": int,
+        "timeFmt": str,
+        "timeZone": int,
+    },
+)
+
+
+def json_to_datetime(
+    json: dict, tzinfo: datetime.timezone | None = None
+) -> datetime.datetime:
+    """convert json time data to datetime"""
 
     if json is None:
         return None
 
-    return cls(
-        **{
-            field.name: json[mkey]
-            for field in dataclasses.fields(cls)
-            if (key := field.metadata.get("key"))
-            and (mkey := mangle_key(key, **kwargs))
-            and mkey in json
-        }
+    if TYPE_CHECKING:
+        # use Time type for static type checking of needed keys
+        typed = cast(Time, json)
+        json: Time = typed
+
+    return datetime.datetime(
+        json.get("year", datetime.date.today().year),
+        json.get("mon"),
+        json.get("day"),
+        json.get("hour", 0),
+        json.get("min", 0),
+        json.get("sec", 0),
+        tzinfo=tzinfo,
     )
-
-
-def _cmp(x: any, y: any):
-    return 0 if x == y else 1 if x > y else -1
-
-
-@dataclasses.dataclass(frozen=True, eq=False)
-class SimpleTime:
-    """Simple Time"""
-
-    hour: int = dataclasses.field(default=0, metadata={"key": "hour"})
-    minute: int = dataclasses.field(default=0, metadata={"key": "min"})
-
-    def to_time(self):
-        """as time"""
-        return datetime.time(self.hour, self.minute)
-
-    @classmethod
-    def from_json(cls, json: dict, **kwargs: Unpack[MangleArgs]) -> Self:
-        """Create value from JSON"""
-        return from_json(cls, json, **kwargs)
-
-    def _isinstance(self, value: any) -> TypeGuard["SimpleTime" | datetime.time]:
-        return isinstance(value, (SimpleTime, datetime.time))
-
-    def __eq__(self, __o: object):
-        if self._isinstance(__o):
-            return self._cmp(__o) == 0
-        raise NotImplementedError
-
-    def __le__(self, __o: object):
-        if self._isinstance(__o):
-            return self._cmp(__o) <= 0
-        raise NotImplementedError
-
-    def __lt__(self, __o: object):
-        if self._isinstance(__o):
-            return self._cmp(__o) < 0
-        raise NotImplementedError
-
-    def __ge__(self, __o: object):
-        if self._isinstance(__o):
-            return self._cmp(__o) >= 0
-        raise NotImplementedError
-
-    def __gt__(self, __o: object):
-        if self._isinstance(__o):
-            return self._cmp(__o) > 0
-        raise NotImplementedError
-
-    def _cmp(self, value: object):
-        assert self._isinstance(value)
-        return _cmp((self.hour, self.minute), (value.hour, value.minute))
 
 
 _ZERO: Final = datetime.timedelta(0)
 
 
-class _TzInfo(datetime.tzinfo):
-    _cache: ClassVar[dict[(bool, int), "_TzInfo"]] = {}
+class Timezone(datetime.tzinfo):
+    """Reolink Timezone"""
+
+    _cache: ClassVar[dict[(bool, int), "Timezone"]] = {}
     __slots__ = ("_hr_chg", "_ofs", "_start", "_end", "_point_cache")
 
-    def __init__(self, dst: "DstInfo", time: "TimeInfo"):
-        self._hr_chg = datetime.timedelta(dst.offset)
+    @staticmethod
+    def get(dst: Dst, time: Time) -> "Timezone":
+        """Esnure single timezone instance"""
+        if dst is None:
+            return None
+        key = (dst["enabled"], time["timeZone"])
+        if t_z := Timezone._cache.get(key):
+            return t_z
+        return Timezone._cache.setdefault(key, Timezone(dst, time))
+
+    def __init__(self, dst: Dst, time: Time):
+        self._hr_chg = dst["offset"]
         # Reolink does positive offest python expects a negative one
-        self._ofs = datetime.timedelta(seconds=-time.tz_offset)
-        self._start = dst.start
-        self._end = dst.end
+        self._ofs = datetime.timedelta(seconds=-time["timeZone"])
+        self._start = _DstRule("start", dst)
+        self._end = _DstRule("end", dst)
         self._point_cache: dict[int, (datetime, datetime)] = {}
 
     def tzname(self, __dt: datetime.datetime | None) -> str | None:
@@ -147,8 +165,8 @@ class _TzInfo(datetime.tzinfo):
         return self._point_cache.setdefault(
             year,
             (
-                self._start.to_datetime(year),
-                self._end.to_datetime(year),
+                self._start.datetime(year),
+                self._end.datetime(year),
             ),
         )
 
@@ -176,309 +194,80 @@ class _TzInfo(datetime.tzinfo):
             return self._hr_chg
         return _ZERO
 
-    @classmethod
-    def get(cls, dst: "DstInfo", time: "TimeInfo"):
-        """get or create timezone object"""
-        key = (dst.enabled, time.tz_offset)
-        return cls._cache.setdefault(key, cls(dst, time))
+
+DateTimeRangeType = tuple[datetime.date, datetime.time, datetime.time]
+DateRangeType = datetime.date | DateTimeRangeType
+
+D = TypeVar("D", bound=DateRangeType, default=datetime.date)
 
 
-@dataclasses.dataclass(frozen=True)
-class DstInfo:
-    """Dst Info"""
-
-    @dataclasses.dataclass(frozen=True, eq=False)
-    class TimeInfo(SimpleTime):
-        """Time Info"""
-
-        month: int = dataclasses.field(default=0, metadata={"key": "mon"})
-        week: int = dataclasses.field(default=0, metadata={"key": "week"})
-        weekday: int = dataclasses.field(default=0, metadata={"key": "weekday"})
-
-        def _isinstance(self, value: any) -> TypeGuard["DstInfo.TimeInfo"]:
-            return isinstance(value, DstInfo.TimeInfo)
-
-        def _cmp(self, value: object):
-            res = super()._cmp(value)
-            if res != 0:
-                return res
-            assert self._isinstance(value)
-            return _cmp(
-                (self.month, self.week, self.weekday),
-                (value.month, value.week, value.weekday),
-            )
-
-        def to_date(self, year: int):
-            """as date"""
-            __date = datetime.date(year, self.month, 1)
-            delta = datetime.timedelta(weeks=self.week, days=(self.weekday - 1) % 7)
-            delta -= datetime.timedelta(days=__date.weekday())
-            return __date + delta
-
-        def to_datetime(self, year: int):
-            """as datetime"""
-            return datetime.datetime.combine(self.to_date(year), self.to_time())
-
-    start: TimeInfo
-    end: TimeInfo
-    enabled: bool
-    offset: int
-
-    @classmethod
-    def from_json(cls, json: dict) -> Self:
-        """Create value from JSON"""
-        if json is None:
-            return None
-        return cls(
-            start=cls.TimeInfo.from_json(json, prefix="start", title_case=True),
-            end=cls.TimeInfo.from_json(json, prefix="end", title_case=True),
-            enabled=json.get("enabled"),
-            offset=json.get("offset"),
-        )
-
-
-@dataclasses.dataclass(frozen=True, eq=False)
-class Time(SimpleTime):
-    """Time"""
-
-    second: int = dataclasses.field(default=0, metadata={"key": "sec"})
-
-    def _isinstance(self, value: any) -> TypeGuard["Time" | SimpleTime | datetime.time]:
-        return super()._isinstance(value)
-
-    def _cmp(self, value: object):
-        res = super()._cmp(value)
-        if res != 0 or not isinstance(value, (Time, datetime.time)):
-            return res
-        return _cmp(self.second, value.second)
-
-    def to_time(self):
-        """as time"""
-        return datetime.time(self.hour, self.minute, self.second)
-
-
-@dataclasses.dataclass(frozen=True, eq=False)
-class Date:
-    """Date"""
-
-    year: int = dataclasses.field(default=0, metadata={"key": "year"})
-    month: int = dataclasses.field(default=0, metadata={"key": "mon"})
-    day: int = dataclasses.field(default=0, metadata={"key": "day"})
-
-    def _isinstance(self, value: any) -> TypeGuard["Date" | datetime.date]:
-        return isinstance(value, (Date, datetime.date))
-
-    def __eq__(self, __o: object):
-        if self._isinstance(__o):
-            return self._cmp(__o) == 0
-        raise NotImplementedError
-
-    def __le__(self, __o: object):
-        if self._isinstance(__o):
-            return self._cmp(__o) <= 0
-        raise NotImplementedError
-
-    def __lt__(self, __o: object):
-        if self._isinstance(__o):
-            return self._cmp(__o) < 0
-        raise NotImplementedError
-
-    def __ge__(self, __o: object):
-        if self._isinstance(__o):
-            return self._cmp(__o) >= 0
-        raise NotImplementedError
-
-    def __gt__(self, __o: object):
-        if self._isinstance(__o):
-            return self._cmp(__o) > 0
-        raise NotImplementedError
-
-    def _cmp(self, value: object):
-        assert self._isinstance(value)
-        return _cmp(
-            (self.year, self.month, self.day), (value.year, value.month, value.day)
-        )
-
-    def to_date(self):
-        """as date"""
-        return datetime.date(self.year, self.month, self.day)
-
-
-@dataclasses.dataclass(frozen=True, eq=False)
-class DateTime(Date, Time):
-    """Datetime"""
-
-    def _isinstance(
-        self, value: any
-    ) -> TypeGuard[
-        "DateTime"
-        | datetime.datetime
-        | Date
-        | datetime.date
-        | Time
-        | datetime.time
-        | SimpleTime
-    ]:
-        return Date._isinstance(self, value) or Time._isinstance(self, value)
-
-    def _cmp(self, value: object):
-        assert self._isinstance(value)
-        if Date._isinstance(self, value):
-            res = Date._cmp(self, value)
-            if res != 0:
-                return res
-        if Time._isinstance(self, value):
-            return Time._cmp(self, value)
-        return 0
-
-    def time(self):
-        """time"""
-        return self.to_time()
-
-    def date(self):
-        """date"""
-        return self.to_date()
-
-    def to_datetime(self, tzinfo: datetime.tzinfo | None = None):
-        """as datetime"""
-        return datetime.datetime.combine(self.date(), self.time(), tzinfo)
-
-
-@dataclasses.dataclass(frozen=True, eq=False)
-class TimeInfo(DateTime):
-    """Time Info"""
-
-    hour_format: int = dataclasses.field(default=0, metadata={"key": "hourFmt"})
-    time_format: str = dataclasses.field(
-        default="DD/MM/YYYY", metadata={"key": "timeFmt"}
-    )
-    tz_offset: int = dataclasses.field(default=0, metadata={"key": "timeZone"})
-
-    def _isinstance(
-        self, value: any
-    ) -> TypeGuard[
-        "TimeInfo"
-        | DateTime
-        | datetime.datetime
-        | Date
-        | datetime.date
-        | Time
-        | datetime.time
-        | SimpleTime
-    ]:
-        return isinstance(value, TimeInfo) or super()._isinstance(value)
-
-    def __eq__(self, __o: object):
-        if not super().__eq__(__o):
-            return False
-        if not isinstance(__o, TimeInfo):
-            return True
-        return (
-            _cmp(
-                (self.hour_format, self.time_format), (__o.hour_format, __o.time_format)
-            )
-            == 0
-        )
-
-    def _cmp(self, value: object):
-        res = super()._cmp(value)
-        if res != 0 or not isinstance(value, TimeInfo):
-            return res
-        return _cmp(self.tz_offset, value.tz_offset)
-
-    def to_datetime(self, tzinfo: datetime.tzinfo | None = ...):
-        if tzinfo is ...:
-            tzinfo = datetime.timezone(datetime.timedelta(seconds=-self.tz_offset))
-        return super().to_datetime(tzinfo)
-
-
-@dataclasses.dataclass(frozen=True)
-class DeviceTime:
-    """Device Time"""
-
-    dst: DstInfo
-    time: TimeInfo
-
-    def to_timezone(self):
-        """as timezone"""
-        return _TzInfo.get(self.dst, self.time)
-
-    def to_datetime(self, include_tzinfo=True):
-        """as datetime"""
-
-        return self.time.to_datetime(self.to_timezone() if include_tzinfo else None)
-
-    @classmethod
-    def from_json(cls, json: dict):
-        """Create value from JSON"""
-        return cls(
-            dst=DstInfo.from_json(json.get("Dst")),
-            time=TimeInfo.from_json(json.get("Time")),
-        )
-
-
-DateRangeType = datetime.datetime | tuple[datetime.date, datetime.time, datetime.time]
-
-
-class DateRange(Sequence[DateRangeType]):
+class DateRange(Sequence[D], Generic[D]):
     "Date(time) range"
 
-    __slots__ = ("_start", "_stop", "_start_time", "_stop_time")
+    __slots__ = ("_start", "_stop")
+
+    @overload
+    def __init__(
+        self,
+        start: datetime.date,
+    ) -> None:
+        ...
+
+    @overload
+    def __init__(
+        self,
+        start: datetime.date,
+        stop: datetime.date,
+    ) -> None:
+        ...
+
+    @overload
+    def __init__(self: "DateRange[DateRangeType]", start: datetime.datetime) -> None:
+        ...
+
+    @overload
+    def __init__(
+        self: "DateRange[DateRangeType]",
+        start: datetime.datetime,
+        stop: datetime.datetime,
+    ) -> None:
+        ...
 
     def __init__(
         self,
-        start: datetime.date | Date | datetime.datetime | DateTime,
-        stop: datetime.date | Date | datetime.datetime | DateTime | None = None,
+        start: datetime.date,
+        stop: datetime.date | None = None,
     ):
         super().__init__()
-        if isinstance(start, DateTime):
-            start = start.to_datetime()
-        elif not isinstance(start, datetime.date):
-            start = start.to_date()
-        if isinstance(stop, DateTime):
-            stop = stop.to_datetime()
-        elif stop is not None and not isinstance(stop, datetime.date):
-            stop = stop.to_date()
         if stop is not None and stop < start:
             (stop, start) = (start, stop)
-        if isinstance(start, datetime.datetime):
-            self._start: datetime.date = start.date()
-            self._start_time: datetime.time = start.time()
-        else:
-            self._start = start
-            self._start_time = None
-
-        if isinstance(stop, datetime.datetime):
-            self._stop: datetime.date = stop.date()
-            self._stop_time: datetime.time = stop.time()
-        else:
-            self._stop = stop
-            self._stop_time = None
+        self._start = start
+        self._stop = stop
 
     @property
     def start(self):
         """start"""
-        if self._start_time is None:
-            return self._start
-        return datetime.datetime.combine(self._start, self._start_time)
+        return self._start
 
     @property
     def stop(self):
         """stop"""
-        if self._stop_time is None:
-            return self._stop
-        return datetime.datetime.combine(self._stop, self._start_time)
+        return self._stop
 
-    def __getitem__(self, __index: SupportsIndex):
-        date = self._start
+    def __getitem__(self, __index: SupportsIndex) -> D:
+        date = (
+            self._start.date()
+            if isinstance(self._start, datetime.datetime)
+            else self._start
+        )
         if __index > 0:
             date += datetime.timedelta(days=int(__index))
         _t = None
-        if date == self._start:
-            _t = self._start_time
+        if date == self._start and isinstance(self._start, datetime.datetime):
+            _t = self._start.time()
         _t2 = None
-        if date == self._stop:
-            _t2 = self._stop_time
+        if date == self._stop and isinstance(self._stop, datetime.datetime):
+            _t2 = self._stop.time()
         if _t is None and _t2 is None:
             return date
         if _t is None:
@@ -492,6 +281,13 @@ class DateRange(Sequence[DateRangeType]):
             if self._stop is not None
             else _t,
         )
+
+    def __contains__(self, value: object):
+        if not isinstance(value, datetime.date):
+            return False
+        if self._stop is None:
+            return self._start == value
+        return self._start <= value <= self._stop
 
     def __len__(self):
         if self._stop is None:

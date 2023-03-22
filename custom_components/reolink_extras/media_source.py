@@ -115,7 +115,7 @@ class ReolinkMediaSource(MediaSource):
             path = f"{source}/{device_id}"
 
             if channel >= 0:
-                title = data.host.api._channel_names[channel]
+                title = data.host.api.camera_name(channel) or f"Channel {channel}"
                 path += f"/{channel}"
 
                 if date_filter is not None:

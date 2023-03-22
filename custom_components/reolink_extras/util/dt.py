@@ -20,6 +20,37 @@ from typing_extensions import (
 if TYPE_CHECKING:
     from typing import cast
 
+
+def date(value: datetime.date):
+    """Get date only"""
+    if isinstance(value, datetime.datetime):
+        return value.date()
+    return value
+
+
+def time(value: datetime.date | datetime.time, default=datetime.time.min):
+    """Get time only"""
+    if isinstance(value, datetime.datetime):
+        return value.time()
+    if not isinstance(value, datetime.time):
+        return default
+    return value
+
+
+def prevmonth(year: int, month: int):
+    """Get previous month"""
+    if month < 2:
+        return (year - 1, 1)
+    return (year, month - 1)
+
+
+def nextmonth(year: int, month: int):
+    """Get next month"""
+    if month > 11:
+        return (year + 1, 1)
+    return (year, month + 1)
+
+
 K = TypeVar("K", infer_variance=True, default=str)
 
 

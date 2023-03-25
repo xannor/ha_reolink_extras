@@ -1,19 +1,14 @@
 """Search helpers"""
 
-import dataclasses
 import datetime
 from typing import (
-    Container,
+    TYPE_CHECKING,
     Generic,
-    Iterable,
-    KeysView,
     Mapping,
-    Protocol,
-    Sequence,
-    Set,
-    Sized,
-    overload,
 )
+
+if TYPE_CHECKING:
+    from typing import cast
 from typing_extensions import SupportsIndex, TypeVar, NamedTuple
 from homeassistant.core import HomeAssistant, callback
 
@@ -158,15 +153,36 @@ class SearchCache(Mapping[datetime.datetime, SearchFile]):
 
     @property
     def min(self):
-        return self._file_range.start
+        """minimum possible date loaded"""
+        return self._status_range.start.to_date()
 
     @property
     def max(self):
+        """maximum possible date loaded"""
+        return datetime.date(
+            *(dt.nextmonth(*self._status_range.end) + (1,))
+        ) + datetime.timedelta(days=-1)
+
+    @property
+    def start(self):
+        """first video start loaded"""
+        return self._file_range.start
+
+    @property
+    def end(self):
+        """last video start loaded"""
         return self._file_range.end
 
     @property
     def _timezone(self) -> dt.Timezone:
         return dt.Timezone.get(**self._host._time_settings)
+
+    def today(self):
+        """ "today" of the camera"""
+        return datetime.date.fromtimestamp(
+            datetime.datetime.utcnow().timestamp()
+            + self._host._subscription_time_difference
+        )
 
     async def _async_host_search(
         self,
@@ -221,40 +237,27 @@ class SearchCache(Mapping[datetime.datetime, SearchFile]):
 
     async def async_update(self):
         """Update cache to most recent events"""
-        await self._async_host_search(datetime.date.today())
+        if not await self._async_host_search(self.today()):
+            # no files this month? is it bad or missing storage?
+            return
         if self._status_range.start == self._hard_start:
-            await self._async_host_search(self._hard_start.to_date())
-
-    async def async_lookup(self, start: datetime.date, end: datetime.date):
-        """search files from cache or device within range"""
-        if not isinstance(start, datetime.datetime):
-            start = datetime.datetime.combine(start, datetime.time.min)
-        if not isinstance(end, datetime.datetime):
-            end = datetime.datetime.combine(end, datetime.time.max)
-
-    async def _async_update_backwards(self):
-        while self._status_range.start != self._hard_start:
-            if not await self._async_host_search(
-                datetime.date(*(dt.prevmonth(*self._status_range.start) + (1,))),
-                status_only=True,
+            while (
+                not await self._async_host_search(self._hard_start.to_date())
+                and self._status_range.start < self._status_range.end
             ):
+                self._status_range = SimpleRange(
+                    YearMonth(*dt.nextmonth(*self._status_range.start)),
+                    self._status_range.end,
+                )
                 self._hard_start = self._status_range.start
-                break
-
-    async def async_full_update(self, hass: HomeAssistant = None):
-        """Update status cache with full range from camera"""
-        await self.async_update()
-        if hass:
-            hass.create_task(self._async_update_backwards())
-        else:
-            await self._async_update_backwards()
 
     async def async_search(
         self, start: datetime.date, end: datetime.date | None = None
-    ) -> Sequence[SearchFile]:
+    ):
+        """Search for videos in range"""
         if start < self._hard_start.to_date():
             start = self._hard_start.to_date()
-        today = datetime.datetime(datetime.date.today(), datetime.time.max)
+        today = datetime.datetime(self.today(), datetime.time.max)
         if end is None or end > today:
             end = today
         if start < self._file_range.start:
@@ -278,8 +281,24 @@ class SearchCache(Mapping[datetime.datetime, SearchFile]):
         if end > self._file_range.end:
             await self._async_host_search(self._file_range.end, end)
         for date in dt.DateRange(start, end):
-            if (status:=self._statuses.get(YearMonth(date.year, date.month))) is not None:
-                for item in status:
+            if TYPE_CHECKING:
+                date = cast(dt.DateRangeType, date)
+            time = None
+            if isinstance(date, tuple):
+                time: tuple[datetime.time, datetime.time]
+                (date, *time) = date
+
+            if (
+                (status := self._statuses.get(YearMonth(date.year, date.month)))
+                is not None
+                and date in status
+                and (files := self._files_by_day.get(date))
+            ):
+                for start in files:
+                    if (time is None or (time[0] <= start.time() <= time[1])) and (
+                        file := self._files.get(start)
+                    ):
+                        yield file
 
 
 @callback

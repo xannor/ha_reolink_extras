@@ -37,14 +37,14 @@ def time(value: datetime.date | datetime.time, default=datetime.time.min):
     return value
 
 
-def prevmonth(year: int, month: int):
+def prevmonth(year: int, month: int) -> tuple[int, int]:
     """Get previous month"""
     if month < 2:
         return (year - 1, 1)
     return (year, month - 1)
 
 
-def nextmonth(year: int, month: int):
+def nextmonth(year: int, month: int) -> tuple[int, int]:
     """Get next month"""
     if month > 11:
         return (year + 1, 1)
@@ -108,11 +108,11 @@ class _DstRule:
 
     def datetime(self, year: int):
         """datetime"""
-        date = datetime.date(year, self.month, 1)
+        __date = datetime.date(year, self.month, 1)
         delta = datetime.timedelta(weeks=self.week, days=self.weekday)
-        delta -= datetime.timedelta(days=date.weekday())
-        date += delta
-        return datetime.datetime.combine(date, datetime.time(self.hour, self.minute))
+        delta -= datetime.timedelta(days=__date.weekday())
+        __date += delta
+        return datetime.datetime.combine(__date, datetime.time(self.hour, self.minute))
 
 
 USING_KEY: Final = str()
@@ -190,18 +190,18 @@ class Timezone(datetime.tzinfo):
     def get(**kwargs: any) -> "Timezone":
         """Esnure single timezone instance"""
         dst: Dst = kwargs.get("Dst", kwargs.get("dst"))
-        time: Time = kwargs.get("Time", kwargs.get("time"))
-        if dst is None or time is None:
+        __time: Time = kwargs.get("Time", kwargs.get("time"))
+        if dst is None or __time is None:
             return None
-        key = (dst["enable"], time["timeZone"])
+        key = (dst["enable"], __time["timeZone"])
         if t_z := Timezone._cache.get(key):
             return t_z
-        return Timezone._cache.setdefault(key, Timezone(dst, time))
+        return Timezone._cache.setdefault(key, Timezone(dst, __time))
 
-    def __init__(self, dst: Dst, time: Time):
+    def __init__(self, dst: Dst, __time: Time):
         self._hr_chg = datetime.timedelta(hours=dst["offset"])
         # Reolink does positive offest python expects a negative one
-        self._ofs = datetime.timedelta(seconds=-time["timeZone"])
+        self._ofs = datetime.timedelta(seconds=-__time["timeZone"])
         self._start = _DstRule("start", dst)
         self._end = _DstRule("end", dst)
         self._point_cache: dict[int, (datetime, datetime)] = {}
@@ -245,10 +245,9 @@ class Timezone(datetime.tzinfo):
         return _ZERO
 
 
-DateTimeRangeType = tuple[datetime.date, datetime.time, datetime.time]
-DateRangeType = datetime.date | DateTimeRangeType
+DateRangeType = datetime.date | tuple[datetime.date, datetime.time, datetime.time]
 
-D = TypeVar("D", bound=DateRangeType, default=datetime.date)
+D = TypeVar("D", bound=DateRangeType, infer_variance=True, default=datetime.date)
 
 
 class DateRange(Sequence[D], Generic[D]):
@@ -305,25 +304,25 @@ class DateRange(Sequence[D], Generic[D]):
         return self._stop
 
     def __getitem__(self, __index: SupportsIndex) -> D:
-        date = (
+        __date = (
             self._start.date()
             if isinstance(self._start, datetime.datetime)
             else self._start
         )
         if __index > 0:
-            date += datetime.timedelta(days=int(__index))
+            __date += datetime.timedelta(days=int(__index))
         _t = None
-        if date == self._start and isinstance(self._start, datetime.datetime):
+        if __date == self._start and isinstance(self._start, datetime.datetime):
             _t = self._start.time()
         _t2 = None
-        if date == self._stop and isinstance(self._stop, datetime.datetime):
+        if __date == self._stop and isinstance(self._stop, datetime.datetime):
             _t2 = self._stop.time()
         if _t is None and _t2 is None:
-            return date
+            return __date
         if _t is None:
             _t = datetime.time.min
         return (
-            date,
+            __date,
             _t,
             _t2
             if _t2 is not None

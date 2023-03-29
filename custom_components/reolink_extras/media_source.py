@@ -1,10 +1,10 @@
 """ Media Source Platform """
 
-import dataclasses
 from datetime import date, datetime, timedelta
+from typing import NamedTuple
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.loader import async_get_integration
-from calendar import month_name
 
 from homeassistant.components.media_player.errors import BrowseError
 from homeassistant.components.media_player.const import MediaClass, MediaType
@@ -19,6 +19,8 @@ from homeassistant.components.media_source.models import (
 from homeassistant.components.reolink import ReolinkData
 from homeassistant.components.reolink.const import DOMAIN as REOLINK_DOMAIN
 
+from .helpers.search import async_get_search_cache
+
 from .const import DOMAIN, LOGGER
 
 
@@ -26,13 +28,12 @@ class IncompatibleMediaSource(MediaSourceError):
     """Incompatible media source attributes."""
 
 
-@dataclasses.dataclass
-class SimpleDate:
+class SimpleDate(NamedTuple):
     """Simple value only date"""
 
     year: int
-    month: int | None = dataclasses.field(default=None)
-    day: int | None = dataclasses.field(default=None)
+    month: int | None
+    day: int | None
 
     def __str__(self) -> str:
         if self.month is None:
@@ -84,21 +85,104 @@ class ReolinkMediaSource(MediaSource):
 
     async def async_browse_media(self, item: MediaSourceItem) -> BrowseMediaSource:
         try:
-            source, device_id, channel = async_parse_identifier(item)
+            source, device_id, channel, filename = async_parse_identifier(item)
         except Unresolvable as err:
             raise BrowseError(str(err)) from err
 
-        return await self._build_item_response(source, device_id, channel)
+        return await self._build_item_response(source, device_id, channel, filename)
+
+    async def _build_channel_files(
+        self,
+        children: list[BrowseMediaSource],
+        source: str,
+        device: ConfigEntry,
+        data: ReolinkData,
+        channel: int,
+        depth: int,
+    ):
+        cache = async_get_search_cache(self.hass, device.entry_id, channel)
+        if not cache.ready:
+            await cache.async_update()
+        while not cache.at_start:
+            await
+        # since we can only search by a limited date range, and the search
+        # can provide hints to which months have videos, we will search
+        # as far as we can and cache that as this would only change
+        # daily
+        # TODO : either ditch cache daily or re-evaulate the low range daily
+        vod_range = self._range_cache.setdefault(device_id, {}).get(channel)
+        if vod_range is None:
+            vod_range = []
+            self._range_cache[device_id][channel] = vod_range
+            end = datetime.utcnow()
+            end = datetime(end.year, end.month + 1, 1) - timedelta(days=1)
+            while True:
+                start = datetime(end.year, 1, 1)
+                statuses, _ = await data.host.api.request_vod_files(
+                    channel,
+                    start,
+                    end,
+                    True,
+                )
+                end = start - timedelta(seconds=1)
+                if statuses is None:
+                    break
+                for status in statuses:
+                    for day, flag in enumerate(status["table"], start=1):
+                        if flag == "1":
+                            vod_range.append(date(status["year"], status["mon"], day))
+            vod_range.sort(reverse=True)
+        # TODO : implement some logic to be practical with a small number of files
+
+        # Large/default Year then Month then Day then files
+
+    async def _build_channels(  # pylint: disable=too-many-arguments
+        self,
+        children: list[BrowseMediaSource],
+        source: str,
+        device: ConfigEntry,
+        data: ReolinkData,
+        depth: int,
+    ):
+        for channel in data.host.api.channels:
+            try:
+                child = await self._build_item_response(
+                    source, device.entry_id, channel, None, depth=depth + 1
+                )
+            except IncompatibleMediaSource:
+                continue
+            if child:
+                children.append(child)
+
+        if len(children) == 1:
+            return children[0].children
+
+    async def _build_devices(
+        self, children: list[BrowseMediaSource], source: str, depth: int
+    ):
+        for device in self.hass.config_entries.async_entries(REOLINK_DOMAIN):
+            if device.disabled_by:
+                continue
+            try:
+                child = await self._build_item_response(
+                    source, device, None, None, depth=depth + 1
+                )
+            except IncompatibleMediaSource:
+                continue
+            if child:
+                children.append(child)
+
+        if len(children) == 1:
+            return children[0].children
 
     async def _build_item_response(
         self,
         source: str,
-        device_id: str,
-        channel: int,
+        device: str | ConfigEntry | None,
+        channel: int | None,
+        filename: str | SimpleDate | None,
         /,
         depth=0,
-        date_filter: SimpleDate | None = None,
-        filename: str | None = None,
     ):
         title = self.name
         thumbnail = None
@@ -106,24 +190,24 @@ class ReolinkMediaSource(MediaSource):
         device = None
         data = None
 
-        if device_id:
-            device = self.hass.config_entries.async_get_entry(device_id)
+        if isinstance(device, str):
+            device = self.hass.config_entries.async_get_entry(device)
             if not device or device.disabled_by:
                 raise IncompatibleMediaSource
-            data: ReolinkData = self.hass.data.get(REOLINK_DOMAIN, {}).get(device_id)
+        if device:
+            data: ReolinkData = self.hass.data.get(REOLINK_DOMAIN, {}).get(
+                device.entry_id
+            )
             title = device.title
-            path = f"{source}/{device_id}"
+            path += f"/{device.entry_id}"
 
-            if channel >= 0:
-                title = data.host.api.camera_name(channel) or f"Channel {channel}"
-                path += f"/{channel}"
+        if channel is not None:
+            title = data.host.api.camera_name(channel) or f"Channel {channel}"
+            path += f"/{channel}"
 
-                if date_filter is not None:
-                    path += f"/{date_filter}"
-                    if date_filter.month is None:
-                        title = str(date_filter.year)
-                    elif date_filter.day is None:
-                        title = str(date_filter)
+        if filename is not None:
+            path += f"/{filename}"
+            title = str(filename)
 
         media_class = MediaClass.DIRECTORY
 
@@ -134,7 +218,7 @@ class ReolinkMediaSource(MediaSource):
             media_content_type=MediaType.VIDEO,
             title=title,
             can_play=False,
-            can_expand=True,
+            can_expand=not isinstance(filename, str),
             thumbnail=thumbnail,
         )
 
@@ -146,71 +230,24 @@ class ReolinkMediaSource(MediaSource):
 
         children: list[BrowseMediaSource] = []
         media.children = children
-        if channel >= 0:
-            # since we can only search by a limited date range, and the search
-            # can provide hints to which months have videos, we will search
-            # as far as we can and cache that as this would only change
-            # daily
-            # TODO : either ditch cache daily or re-evaulate the low range daily
-            vod_range = self._range_cache.setdefault(device_id, {}).get(channel)
-            if vod_range is None:
-                vod_range = []
-                self._range_cache[device_id][channel] = vod_range
-                end = datetime.utcnow()
-                end = datetime(end.year, end.month + 1, 1) - timedelta(days=1)
-                while True:
-                    start = datetime(end.year, 1, 1)
-                    statuses, _ = await data.host.api.request_vod_files(
-                        channel,
-                        start,
-                        end,
-                        True,
-                    )
-                    end = start - timedelta(seconds=1)
-                    if statuses is None:
-                        break
-                    for status in statuses:
-                        for day, flag in enumerate(status["table"], start=1):
-                            if flag == "1":
-                                vod_range.append(
-                                    date(status["year"], status["mon"], day)
-                                )
-                vod_range.sort(reverse=True)
-            # TODO : implement some logic to be practical with a small number of files
 
-            # Large/default Year then Month then Day then files
-
-        if data:
-            for channel in data.host.api.channels:
-                try:
-                    child = await self._build_item_response(
-                        source, device.entry_id, channel, depth=depth + 1
-                    )
-                except IncompatibleMediaSource:
-                    continue
-                if child:
-                    children.append(child)
-
-            if len(children) == 1:
-                media.children = children[0].children
+        if channel is not None:
+            pass
+        elif data:
+            media = (
+                await self._build_channels(children, source, device, data, depth)
+                or media
+            )
         else:
-            for device in self.hass.config_entries.async_entries(REOLINK_DOMAIN):
-                if device.disabled_by:
-                    continue
-                try:
-                    child = await self._build_item_response(
-                        source, device.entry_id, -1, depth=depth + 1
-                    )
-                except IncompatibleMediaSource:
-                    continue
-                if child:
-                    media.children.append(child)
+            media = await self._build_devices(children, source, depth) or media
 
         return media
 
 
 @callback
-def async_parse_identifier(item: MediaSourceItem) -> tuple[str, str, int]:
+def async_parse_identifier(
+    item: MediaSourceItem,
+) -> tuple[str, str, int | None, str | None]:
     """Parse Identifier."""
     if not item.identifier or "/" not in item.identifier:
         return "devices", "", -1
@@ -221,9 +258,10 @@ def async_parse_identifier(item: MediaSourceItem) -> tuple[str, str, int]:
 
     if "/" in path:
         device_id, channel = path.split("/", 1)
+        filename = None
         if "/" in channel:
             channel, filename = channel.split("/", 1)
 
-        return source, device_id, int(channel)
+        return source, device_id, int(channel), filename
 
-    return source, path, -1
+    return source, path, None, None

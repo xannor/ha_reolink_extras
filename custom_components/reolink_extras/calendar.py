@@ -2,8 +2,7 @@
 
 from dataclasses import dataclass
 import datetime
-from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Sequence, cast
-from typing_extensions import TypeVar
+from typing import Callable
 from homeassistant.config_entries import (
     ConfigEntry,
 )
@@ -14,16 +13,13 @@ from homeassistant.helpers.entity import EntityDescription
 from homeassistant.components.calendar import CalendarEntity, CalendarEvent
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
-from reolink_aio.api import Host
-from reolink_aio.typings import SearchFile, SearchStatus
-
 from homeassistant.components.reolink import ReolinkData
 from homeassistant.components.reolink.entity import ReolinkCoordinatorEntity
 
+from reolink_aio.api import Host
+
 from .helpers import async_forward_reolink_entries, async_get_reolink_data
 from .helpers.search import async_get_search_cache, SearchCache
-
-from .util import dt
 
 
 @dataclass
@@ -93,7 +89,7 @@ class ReolinkVODCalendar(ReolinkCoordinatorEntity, CalendarEntity):
 
     @property
     def event(self) -> CalendarEvent | None:
-        if file := self._cache.get(self._cache.max):
+        if file := self._cache.get(self._cache.last):
             return CalendarEvent(file.start, file.end, file.name)
 
         return None
@@ -104,12 +100,14 @@ class ReolinkVODCalendar(ReolinkCoordinatorEntity, CalendarEntity):
         start_date: datetime.datetime,
         end_date: datetime.datetime,
     ) -> list[CalendarEvent]:
-        results = await self._cache.async_search(start_date, end_date)
-        return (CalendarEvent(file.start, file.end, file.name) for file in results)
+        results = self._cache.async_search(start_date, end_date)
+        return [
+            CalendarEvent(file.start, file.end, file.name) async for file in results
+        ]
 
     async def async_added_to_hass(self) -> None:
         """Entity created."""
-        await self._cache.async_full_update(self.hass)
+        await self._cache.async_update(self.hass)
         await super().async_added_to_hass()
         self.async_on_remove(
             async_dispatcher_connect(
@@ -126,7 +124,7 @@ class ReolinkVODCalendar(ReolinkCoordinatorEntity, CalendarEntity):
             )
         )
 
-    async def _async_handle_event(self, event):
+    async def _async_handle_event(self, event):  # pylint: disable=unused-argument
         """Handle incoming event for motion detection"""
         await self._cache.async_update()
         self.async_write_ha_state()

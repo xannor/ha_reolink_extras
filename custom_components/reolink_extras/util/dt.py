@@ -3,10 +3,10 @@
 import dataclasses
 import datetime
 from typing import (
-    TYPE_CHECKING,
     ClassVar,
     Final,
     Generic,
+    NamedTuple,
     Sequence,
     TypedDict,
     overload,
@@ -17,94 +17,271 @@ from typing_extensions import (
     Unpack,
 )
 
-if TYPE_CHECKING:
-    from typing import cast
+
+def _mangle_field_metadata(field: dataclasses.Field, json: dict):
+    key: str = field.metadata.get("key", field.name) or field.name
+    if (value := json.get(key, ...)) is ...:
+        return ...
+    if (
+        trans := field.metadata.get("transform", field.metadata.get("trans"))
+    ) and callable(trans):
+        value = trans(value)
+    return value
 
 
-def date(value: datetime.date):
+def _mangle_dataclass_metadata(cls, json: dict):
+    return {
+        field.name: value
+        for field in dataclasses.fields(cls)
+        if (value := _mangle_dataclass_metadata(field, json)) is not ...
+    }
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True, order=True)
+class _YearMonth:
+    year: int
+    month: int = dataclasses.field(metadata={"key": "mon"})
+
+    def date(self, day=1):
+        """date"""
+        return datetime.date(self.year, self.month, day)
+
+    @classmethod
+    def from_json(cls, json: dict):
+        """from json"""
+        return cls(**_mangle_dataclass_metadata(cls, json))
+
+
+class YearMonth(_YearMonth):
+    """Year and Month"""
+
+    min: ClassVar["YearMonth"]
+    max: ClassVar["YearMonth"]
+
+    __slots__ = ()
+
+    def next(self):
+        """next month"""
+        if self.month > 11:
+            return YearMonth(year=self.year + 1, month=1)
+        return YearMonth(year=self.year, month=self.month + 1)
+
+    def prev(self):
+        """previous month"""
+        if self.month < 2:
+            return YearMonth(year=self.year - 1, month=12)
+        return YearMonth(year=self.year, month=self.month - 1)
+
+
+YearMonth.max = YearMonth(year=datetime.date.max.year, month=datetime.date.max.month)
+YearMonth.min = YearMonth(year=datetime.date.min.year, month=datetime.date.min.month)
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True, order=True)
+class SimpleDate(_YearMonth):
+    """Simple Date"""
+
+    min: ClassVar["SimpleDate"]
+    max: ClassVar["SimpleDate"]
+
+    day: int = dataclasses.field(default=1)
+
+    @overload
+    def __init__(self, *, year: int, month: int, day: int) -> None:
+        ...
+
+    # pylint: disable=arguments-differ
+    def date(self):
+        """date"""
+        return super().date(self.day)
+
+
+SimpleDate.min = SimpleDate(
+    year=datetime.date.min.year,
+    month=datetime.date.min.month,
+    day=datetime.date.min.day,
+)
+SimpleDate.max = SimpleDate(
+    year=datetime.date.max.year,
+    month=datetime.date.max.month,
+    day=datetime.date.max.day,
+)
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True, order=True)
+class HourMinute:
+    """Hour / Minute"""
+
+    min: ClassVar["HourMinute"]
+    max: ClassVar["HourMinute"]
+
+    hour: int
+    minute: int = dataclasses.field(metadata={"key": "min"})
+
+    def time(self, second: int = 0, tzinfo: datetime.timezone = None):
+        """time"""
+        return datetime.time(self.hour, self.minute, second, tzinfo)
+
+    @classmethod
+    def from_json(cls, json: dict):
+        """from json"""
+        return cls(**_mangle_dataclass_metadata(cls, json))
+
+
+HourMinute.min = HourMinute(
+    hour=datetime.time.min.hour, minute=datetime.time.min.minute
+)
+HourMinute.max = HourMinute(
+    hour=datetime.time.max.hour, minute=datetime.time.max.minute
+)
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True, order=True)
+class SimpleTime(HourMinute):
+    """Simple Time"""
+
+    min: ClassVar["SimpleTime"]
+    max: ClassVar["SimpleTime"]
+
+    second: int = dataclasses.field(metadata={"key": "sec"})
+
+    @overload
+    def __init__(self, *, hour: int, minute: int, second: int) -> None:
+        ...
+
+    # pylint: disable=arguments-differ
+    def time(self, tzinfo: datetime.timezone = None):
+        """time"""
+        super().time(self.second, tzinfo)
+
+
+SimpleTime.min = SimpleTime(
+    hour=datetime.time.min.hour,
+    minute=datetime.time.min.minute,
+    second=datetime.time.min.second,
+)
+SimpleTime.max = SimpleTime(
+    hour=datetime.time.max.hour,
+    minute=datetime.time.max.minute,
+    second=datetime.time.min.second,
+)
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True, order=True)
+class SimpleDateTime(SimpleTime, SimpleDate):
+    """Simple DateTime"""
+
+    min: ClassVar["SimpleDateTime"]
+    max: ClassVar["SimpleDateTime"]
+
+    @overload
+    def __init__(
+        self, *, year: int, month: int, day: int, hour: int, minute: int, second: int
+    ) -> None:
+        ...
+
+    def datetime(self, tzinfo: datetime.timezone = None):
+        """datetime"""
+        return datetime.datetime(self.date(), self.time(tzinfo))
+
+    @classmethod
+    def combine(
+        cls, date: SimpleDate, time: SimpleTime  # pylint: disable=redefined-outer-name
+    ):
+        """combine date and time"""
+        return cls(
+            year=date.year,
+            month=date.month,
+            day=date.day,
+            hour=time.hour,
+            minute=time.minute,
+            second=time.second,
+        )
+
+
+def date(value: datetime.date | SimpleDate):
     """Get date only"""
-    if isinstance(value, datetime.datetime):
+    if isinstance(value, (datetime.datetime, SimpleDate)):
         return value.date()
     return value
 
 
-def time(value: datetime.date | datetime.time, default=datetime.time.min):
+def time(value: datetime.time | SimpleTime):
     """Get time only"""
-    if isinstance(value, datetime.datetime):
+    if isinstance(value, (datetime.datetime, SimpleTime)):
         return value.time()
-    if not isinstance(value, datetime.time):
-        return default
     return value
 
 
-def prevmonth(year: int, month: int) -> tuple[int, int]:
-    """Get previous month"""
-    if month < 2:
-        return (year - 1, 1)
-    return (year, month - 1)
+class MangleOptions(NamedTuple):
+    """Mangle Options"""
+
+    prefix: str | None
+    suffix: str | None
+    title_case: bool | None
 
 
-def nextmonth(year: int, month: int) -> tuple[int, int]:
-    """Get next month"""
-    if month > 11:
-        return (year + 1, 1)
-    return (year, month + 1)
-
-
-K = TypeVar("K", infer_variance=True, default=str)
-
-
-def mangle_key(
-    key: K,
-    /,
-    prefix: str | None = None,
-    suffix: str | None = None,
-    title_case: bool | None = None,
-) -> K:
-    """mangle Key"""
-    if prefix:
-        if not key:
-            key = prefix
-        elif title_case:
-            key = prefix + key.title()
-        else:
-            key = prefix + key
-    if suffix:
-        if not key:
-            return suffix
-        if title_case:
-            suffix = suffix.title()
-        return key + suffix
+def _mangle_key(key: str, options: MangleOptions):
+    if options.prefix and key.startswith(options.prefix):
+        key = key[len(options.prefix) :]
+    if options.suffix and key.endswith(options.suffix):
+        key = key[: -len(options.suffix)]
+    if options.title_case:
+        key = key.lower()
     return key
 
 
-Mangle = TypedDict(
-    "Mangle",
-    {"prefix": str | None, "suffix": str | None, "title_case": bool | None},
-    total=False,
-)
+@overload
+def mangle(prefix: str, __dict: dict, /) -> dict:
+    ...
 
 
-@dataclasses.dataclass(frozen=True, init=False)
-class _DstRule:
+@overload
+def mangle(prefix: str, **kwargs: any) -> dict:
+    ...
+
+
+@overload
+def mangle(prefix: str | None, suffix: str, __dict: dict, /) -> dict:
+    ...
+
+
+@overload
+def mangle(prefix: str | None, suffix: str, **kwargs) -> dict:
+    ...
+
+
+@overload
+def mangle(
+    prefix: str | None, suffix: str | None, title_case: bool | None, __dict: dict, /
+) -> dict:
+    ...
+
+
+@overload
+def mangle(prefix: str | None, suffix: str, title_case: bool | None, **kwargs) -> dict:
+    ...
+
+
+def mangle(*args, **kwargs):
+    """get mangled subview of dictionary"""
+    options = MangleOptions(
+        *(arg for arg in args if arg is None or isinstance(arg, (str, bool)))
+    )
+    if len(args) > 0 and isinstance(args[-1], dict):
+        kwargs.update(args[-1])
+    return {
+        mkey: value
+        for key, value in kwargs.items()
+        if (mkey := _mangle_key(key, options)) != key
+    }
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _DstRule(HourMinute):
     month: int = dataclasses.field(metadata={"key": "mon"})
     week: int
     weekday: int
-    hour: int
-    minute: int = dataclasses.field(metadata={"key": "min"})
-
-    def __init__(self, prefix: str, json: dict) -> None:
-        for field in dataclasses.fields(self):
-            object.__setattr__(
-                self,
-                field.name,
-                json.get(
-                    mangle_key(
-                        field.metadata.get("key", field.name), prefix, title_case=True
-                    )
-                ),
-            )
-        object.__setattr__(self, "weekday", (self.weekday + 1) % 7)
 
     def datetime(self, year: int):
         """datetime"""
@@ -143,28 +320,28 @@ Time = TypedDict(
 GetTimeResponse = TypedDict("GetTimeResponse", {"Dst": Dst, "Time": Time})
 
 
-def json_to_datetime(
-    json: dict, tzinfo: datetime.timezone | None = None
-) -> datetime.datetime:
-    """convert json time data to datetime"""
+# def json_to_datetime(
+#     json: dict, tzinfo: datetime.timezone | None = None
+# ) -> datetime.datetime:
+#     """convert json time data to datetime"""
 
-    if json is None:
-        return None
+#     if json is None:
+#         return None
 
-    if TYPE_CHECKING:
-        # use Time type for static type checking of needed keys
-        typed = cast(Time, json)
-        json: Time = typed
+#     if TYPE_CHECKING:
+#         # use Time type for static type checking of needed keys
+#         typed = cast(Time, json)
+#         json: Time = typed
 
-    return datetime.datetime(
-        json.get("year", datetime.date.today().year),
-        json.get("mon"),
-        json.get("day"),
-        json.get("hour", 0),
-        json.get("min", 0),
-        json.get("sec", 0),
-        tzinfo=tzinfo,
-    )
+#     return datetime.datetime(
+#         json.get("year", datetime.date.today().year),
+#         json.get("mon"),
+#         json.get("day"),
+#         json.get("hour", 0),
+#         json.get("min", 0),
+#         json.get("sec", 0),
+#         tzinfo=tzinfo,
+#     )
 
 
 _ZERO: Final = datetime.timedelta(0)
@@ -178,7 +355,7 @@ class Timezone(datetime.tzinfo):
 
     @overload
     @staticmethod
-    def get(dst: Dst, time: Time) -> "Timezone":
+    def get(dst: Dst, time: Time) -> "Timezone":  # pylint: disable=redefined-outer-name
         ...
 
     @overload
@@ -202,8 +379,8 @@ class Timezone(datetime.tzinfo):
         self._hr_chg = datetime.timedelta(hours=dst["offset"])
         # Reolink does positive offest python expects a negative one
         self._ofs = datetime.timedelta(seconds=-__time["timeZone"])
-        self._start = _DstRule("start", dst)
-        self._end = _DstRule("end", dst)
+        self._start = _DstRule.from_json(mangle("start", dst))
+        self._end = _DstRule.from_json(mangle("end", dst))
         self._point_cache: dict[int, (datetime, datetime)] = {}
 
     def tzname(self, __dt: datetime.datetime | None) -> str | None:

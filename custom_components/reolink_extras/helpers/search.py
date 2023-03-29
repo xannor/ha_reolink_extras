@@ -1,18 +1,16 @@
 """Search helpers"""
 
+import dataclasses
 import datetime
 from typing import (
     TYPE_CHECKING,
-    Generic,
     Mapping,
+    Sequence,
 )
+from typing_extensions import SupportsIndex, TypeVar
 
-if TYPE_CHECKING:
-    from typing import cast
-from typing_extensions import SupportsIndex, TypeVar, NamedTuple
 from homeassistant.core import HomeAssistant, callback
 
-from reolink_aio import typings
 from reolink_aio.api import Host
 
 from ..const import DOMAIN
@@ -21,97 +19,83 @@ from . import async_get_reolink_data
 
 from ..util import dt
 
+if TYPE_CHECKING:
+    from typing import cast
+
 T = TypeVar("T", infer_variance=True)
 
 
-class SimpleRange(NamedTuple, Generic[T]):
-    """Simple Range"""
-
-    start: T
-    end: T
-
-
-class YearMonth(NamedTuple):
-    """Year and Month"""
-
-    year: int
-    month: int
-
-    @staticmethod
-    def from_date(value: datetime.date):
-        """from date"""
-        return YearMonth(value.year, value.month)
-
-    def to_date(self, day=1):
-        """to date"""
-        return datetime.date(self.year, self.month, day)
+def _table_days(table: str):
+    if not isinstance(table, str):
+        return table
+    return tuple(i for i, flag in enumerate(table, start=1) if flag == "1")
 
 
-class SearchStatus(dt.DateRange):
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True, order=True)
+class SearchStatus(dt.YearMonth, Sequence[datetime.date]):
     """Search Status"""
 
-    def __init__(self, status: typings.SearchStatus):
-        start = datetime.date(status["year"], status["mon"], 1)
-        end = datetime.date(*(dt.nextmonth(start.year, start.month) + (1,)))
-        super().__init__(start, end)
-        self._days = tuple(
-            i for i, flag in enumerate(status["table"], start=1) if flag == "1"
-        )
-
-    def __contains__(self, value: object):
-        if not isinstance(value, datetime.date):
-            if isinstance(value, int):
-                return value in self._days
-            return False
-        return self.start <= value < self.stop and value.day in self._days
+    days: tuple[int, ...] = dataclasses.field(
+        metadata={"key": "table", "transform": _table_days}
+    )
 
     def __getitem__(self, __index: SupportsIndex):
-        return self._start + datetime.timedelta(days=self._days[__index] - 1)
+        return datetime.date(self.year, self.month, self.days[__index])
 
     def __len__(self):
-        return len(self._days)
+        return len(self.days)
+
+    def __contains__(self, value: object):
+        if not isinstance(value, (dt.YearMonth, datetime.date)):
+            return isinstance(value, int) and value in self.days
+        if self.year != value.year or self.month != value.month:
+            return False
+        if not isinstance(value, (dt.SimpleDate, datetime.date)):
+            if isinstance(value, SearchStatus):
+                return value == self or set(value.days).issubset(self.days)
+            return False
+        return value.day in self.days
+
+    def __iter__(self):
+        for day in self.days:
+            yield self.date(day)
 
 
-class SearchFileInfo(NamedTuple):
-    """Search File Info"""
-
-    frame_rate: int
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _SearchFileInfo:
+    frame_rate: int = dataclasses.field(metadata={"key": "frameRate"})
     width: int
     height: int
     size: int
     type: str
 
-    @staticmethod
-    def from_json(json: typings.SearchFile):
+    @classmethod
+    def from_json(cls, json: dict):
         """from json"""
-
-        return SearchFileInfo(
-            json.get("frameRate"),
-            json.get("width"),
-            json.get("height"),
-            json.get("size"),
-            json.get("type"),
-        )
+        # pylint: disable=protected-access
+        return cls(**dt._mangle_dataclass_metadata(cls, json))
 
 
-class SearchFile(NamedTuple):
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class SearchFile:
     """Search File"""
 
     name: str
-    start: datetime.datetime
-    info: SearchFileInfo
-    end: datetime.datetime
+    start: dt.SimpleDateTime = dataclasses.field(
+        metadata={"key": "StartTime", "transform": dt.SimpleDateTime.from_json}
+    )
+    info: _SearchFileInfo = dataclasses.field(
+        metadata={"transform": _SearchFileInfo.from_json}
+    )
+    end: dt.SimpleDateTime = dataclasses.field(
+        metadata={"key": "EndTime", "transform": dt.SimpleDateTime.from_json}
+    )
 
-    @staticmethod
-    def from_json(json: typings.SearchFile, tzinfo: datetime.timezone | None = None):
+    @classmethod
+    def from_json(cls, json: dict):
         """from json"""
-
-        return SearchFile(
-            json.get("name"),
-            dt.json_to_datetime(json.get("StartTime"), tzinfo),
-            SearchFileInfo.from_json(json),
-            dt.json_to_datetime(json.get("EndTime"), tzinfo),
-        )
+        # pylint: disable=protected-access
+        return cls(**dt._mangle_dataclass_metadata(cls, json))
 
 
 class SearchCache(Mapping[datetime.datetime, SearchFile]):
@@ -124,14 +108,15 @@ class SearchCache(Mapping[datetime.datetime, SearchFile]):
         self._entry_id = entry_id
         self._channel = channel
         self._unique_id = unique_id
-        self._statuses: dict[YearMonth, SearchStatus] = {}
-        self._hard_start = YearMonth(-9999, -13)
-        self._status_range = SimpleRange(
-            YearMonth(-self._hard_start.year, -self._hard_start.month), self._hard_start
-        )
+        self._statuses: dict[dt.YearMonth, SearchStatus] = {}
+        self._statuses_min = dt.YearMonth.max
+        self._statuses_max = dt.YearMonth.min
+        self._hard_start = dt.YearMonth.min
+
         self._files: dict[datetime.datetime, SearchFile] = {}
         self._files_by_day: dict[datetime.date, list[datetime.datetime]] = {}
-        self._file_range = SimpleRange(datetime.datetime.max, datetime.datetime.min)
+        self._files_min = datetime.datetime.max
+        self._files_max = datetime.datetime.min
 
     def __getitem__(self, __key: datetime.datetime):
         return self._files.__getitem__(__key)
@@ -152,37 +137,22 @@ class SearchCache(Mapping[datetime.datetime, SearchFile]):
         return self._files.items()
 
     @property
-    def min(self):
-        """minimum possible date loaded"""
-        return self._status_range.start.to_date()
-
-    @property
-    def max(self):
-        """maximum possible date loaded"""
-        return datetime.date(
-            *(dt.nextmonth(*self._status_range.end) + (1,))
-        ) + datetime.timedelta(days=-1)
-
-    @property
-    def start(self):
-        """first video start loaded"""
-        return self._file_range.start
-
-    @property
-    def end(self):
-        """last video start loaded"""
-        return self._file_range.end
-
-    @property
     def _timezone(self) -> dt.Timezone:
+        # pylint: disable=protected-access
         return dt.Timezone.get(**self._host._time_settings)
 
     def today(self):
         """ "today" of the camera"""
+        # pylint: disable=protected-access
         return datetime.date.fromtimestamp(
             datetime.datetime.utcnow().timestamp()
             + self._host._subscription_time_difference
         )
+
+    @property
+    def last(self):
+        """the most recent file in cache"""
+        return self._files_max
 
     async def _async_host_search(
         self,
@@ -208,61 +178,76 @@ class SearchCache(Mapping[datetime.datetime, SearchFile]):
         )
         if statuses is None:
             return False
-        (low, high) = self._status_range
         for status in statuses:
-            key = YearMonth(status["year"], status["mon"])
-            if key < low:
-                low = key
-            if key > high:
-                high = key
-            self._statuses[key] = SearchStatus(status)
-        self._status_range = SimpleRange(low, high)
+            _status = SearchStatus.from_json(status)
+            key = dt.YearMonth(year=_status.year, month=_status.month)
+            if self._statuses_min > key:
+                self._statuses_min = key
+            if self._statuses_max < key:
+                self._statuses_max = key
+            self._statuses[key] = _status
         if files is None:
             return True
-        (low, high) = self._file_range
         needs_sort: set[list] = set()
         for file in files:
-            key = dt.json_to_datetime(file["StartTime"])
-            if key < low:
-                low = key
-            if key > high:
-                high = key
-            self._files[key] = SearchFile.from_json(file, self._timezone)
+            _file = SearchFile.from_json(file)
+            key = _file.start.datetime(self._timezone)
+            if self._files_min > key:
+                self._files_min = key
+            if self._files_max < key:
+                self._files_max = key
+            self._files[key] = _file
             by_day = self._files_by_day.setdefault(key.date(), [])
             by_day.append(key)
             needs_sort.add(by_day)
-        self._file_range = SimpleRange(low, high)
         for item in needs_sort:
             item.sort()
+
+    async def async_find_start(self):
+        """Update the cache status backwards to find start range"""
+        month = self._statuses_min
+        if month > self._statuses_max:
+            today = self.today()
+            month = dt.YearMonth(year=today.year, month=today.month)
+
+        while self._hard_start != month:
+            await self._async_host_search(
+                month.to_date(1),
+                month.next().to_date(1) - datetime.timedelta(days=1),
+                status_only=True,
+            )
+            if self._hard_start != month:
+                month = month.prev()
+
+        # return SearchRange(self._statuses, self._status_range)
 
     async def async_update(self):
         """Update cache to most recent events"""
         if not await self._async_host_search(self.today()):
             # no files this month? is it bad or missing storage?
             return
-        if self._status_range.start == self._hard_start:
+        if self._hard_start == self._statuses_min:
             while (
-                not await self._async_host_search(self._hard_start.to_date())
-                and self._status_range.start < self._status_range.end
-            ):
-                self._status_range = SimpleRange(
-                    YearMonth(*dt.nextmonth(*self._status_range.start)),
-                    self._status_range.end,
+                not await self._async_host_search(
+                    self._hard_start.date(), status_only=True
                 )
-                self._hard_start = self._status_range.start
+                and self._statuses_min < self._statuses_max
+            ):
+                self._statuses_min = self._statuses_min.prev()
+                self._hard_start = self._statuses_min
 
     async def async_search(
         self, start: datetime.date, end: datetime.date | None = None
     ):
         """Search for videos in range"""
-        if start < self._hard_start.to_date():
-            start = self._hard_start.to_date()
+        if start < self._hard_start.date():
+            start = self._hard_start.date()
         today = datetime.datetime(self.today(), datetime.time.max)
         if end is None or end > today:
             end = today
-        if start < self._file_range.start:
-            if start >= self._status_range.start.to_date():
-                status_key = self._status_range.start
+        if start < self._files_min:
+            if start >= self._statuses_min.date():
+                status_key = self._statuses_min
                 near = None
                 while near is None and status_key in self._statuses:
                     status = self._statuses[status_key]
@@ -277,9 +262,9 @@ class SearchCache(Mapping[datetime.datetime, SearchFile]):
                         last_date = date
                 if near is not None:
                     start = near
-            await self._async_host_search(start, self._file_range.start)
-        if end > self._file_range.end:
-            await self._async_host_search(self._file_range.end, end)
+            await self._async_host_search(start, self._files_min)
+        if end > self._files_max:
+            await self._async_host_search(self._files_max, end)
         for date in dt.DateRange(start, end):
             if TYPE_CHECKING:
                 date = cast(dt.DateRangeType, date)
@@ -289,7 +274,11 @@ class SearchCache(Mapping[datetime.datetime, SearchFile]):
                 (date, *time) = date
 
             if (
-                (status := self._statuses.get(YearMonth(date.year, date.month)))
+                (
+                    status := self._statuses.get(
+                        dt.YearMonth(year=date.year, month=date.month)
+                    )
+                )
                 is not None
                 and date in status
                 and (files := self._files_by_day.get(date))
@@ -306,10 +295,27 @@ def async_get_search_cache(hass: HomeAssistant, entry_id: str, channel=0):
     """Get search cache for reolink camera/channel"""
 
     domain_data: dict[str, dict[str, any]] = hass.data[DOMAIN]
-    entry_data = domain_data.setdefault(entry_id, {})
-    search_data: dict[int, SearchCache] = entry_data.setdefault("search", {})
+    if (
+        entry := hass.config_entries.async_get_entry(entry_id)
+    ) is None or entry.disabled_by:
+        raise KeyError("Missing/Disabled entry specified")
+
+    search_data = domain_data.setdefault("search", {})
+
+    entry_data: dict[int, SearchCache] = {}
+    new_entry_data = entry_data
+    if (
+        entry_data := search_data.setdefault(entry_id, new_entry_data)
+    ) is new_entry_data:
+        # we want to cleanup if the entry gets unloaded so we dont hang
+        # on to references
+        def unload():
+            del domain_data[entry_id]
+
+        entry.async_on_unload(unload)
+
     data = async_get_reolink_data(hass, entry_id)
-    return search_data.setdefault(
+    return entry_data.setdefault(
         channel,
         SearchCache(data.host.api, entry_id, channel, unique_id=data.host.unique_id),
     )

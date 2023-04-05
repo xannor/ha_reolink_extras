@@ -18,97 +18,63 @@ from typing_extensions import (
 )
 
 
-def _mangle_field_metadata(field: dataclasses.Field, json: dict):
-    key: str = field.metadata.get("key", field.name) or field.name
-    if (value := json.get(key, ...)) is ...:
-        return ...
-    if (
-        trans := field.metadata.get("transform", field.metadata.get("trans"))
-    ) and callable(trans):
-        value = trans(value)
-    return value
+class YearMonthJson(TypedDict):
+    """YeaRMonth JSON"""
 
-
-def _mangle_dataclass_metadata(cls, json: dict):
-    return {
-        field.name: value
-        for field in dataclasses.fields(cls)
-        if (value := _mangle_dataclass_metadata(field, json)) is not ...
-    }
-
-
-@dataclasses.dataclass(frozen=True, slots=True, kw_only=True, order=True)
-class _YearMonth:
     year: int
-    month: int = dataclasses.field(metadata={"key": "mon"})
-
-    def date(self, day=1):
-        """date"""
-        return datetime.date(self.year, self.month, day)
-
-    @classmethod
-    def from_json(cls, json: dict):
-        """from json"""
-        return cls(**_mangle_dataclass_metadata(cls, json))
+    mon: int
+    """month"""
 
 
-class YearMonth(_YearMonth):
+@dataclasses.dataclass(slots=True, frozen=True, order=True)
+class YearMonth:
     """Year and Month"""
 
     min: ClassVar["YearMonth"]
     max: ClassVar["YearMonth"]
 
-    __slots__ = ()
+    year: int
+    mon: dataclasses.InitVar[int]
+    month: int = dataclasses.field(init=False)
 
-    def next(self):
-        """next month"""
-        if self.month > 11:
-            return YearMonth(year=self.year + 1, month=1)
-        return YearMonth(year=self.year, month=self.month + 1)
+    def __post_init__(self, mon: int):
+        object.__setattr__(self, "month", mon)
 
-    def prev(self):
-        """previous month"""
-        if self.month < 2:
-            return YearMonth(year=self.year - 1, month=12)
-        return YearMonth(year=self.year, month=self.month - 1)
+    def date(self, day=1):
+        """Return as date"""
+        return datetime.date(self.year, self.month, day)
 
+    def timetuple(self):
+        """return as time_struct"""
+        return self.date().timetuple()
 
-YearMonth.max = YearMonth(year=datetime.date.max.year, month=datetime.date.max.month)
-YearMonth.min = YearMonth(year=datetime.date.min.year, month=datetime.date.min.month)
-
-
-@dataclasses.dataclass(frozen=True, slots=True, kw_only=True, order=True)
-class SimpleDate(_YearMonth):
-    """Simple Date"""
-
-    min: ClassVar["SimpleDate"]
-    max: ClassVar["SimpleDate"]
-
-    day: int = dataclasses.field(default=1)
-
-    @overload
-    def __init__(self, *, year: int, month: int, day: int) -> None:
-        ...
-
-    # pylint: disable=arguments-differ
-    def date(self):
-        """date"""
-        return super().date(self.day)
+    def replace(self, year: int = None, month: int = None):
+        """Return a new YearMonth with new values for the specified fields."""
+        if year is None:
+            year = self.year
+        if month is None:
+            month = self.month
+        return type(self)(year, month)
 
 
-SimpleDate.min = SimpleDate(
-    year=datetime.date.min.year,
-    month=datetime.date.min.month,
-    day=datetime.date.min.day,
-)
-SimpleDate.max = SimpleDate(
-    year=datetime.date.max.year,
-    month=datetime.date.max.month,
-    day=datetime.date.max.day,
-)
+YearMonth.max = YearMonth(datetime.date.max.year, datetime.date.max.month)
+YearMonth.min = YearMonth(datetime.date.min.year, datetime.date.min.month)
 
 
-@dataclasses.dataclass(frozen=True, slots=True, kw_only=True, order=True)
+class DateJson(YearMonthJson):
+    """Date JSON"""
+
+    day: int
+
+
+class HourMinuteJson(TypedDict):
+    """Hour Minute JSON"""
+
+    hour: int
+    min: int
+
+
+@dataclasses.dataclass(frozen=True, slots=True, order=True)
 class HourMinute:
     """Hour / Minute"""
 
@@ -116,99 +82,184 @@ class HourMinute:
     max: ClassVar["HourMinute"]
 
     hour: int
-    minute: int = dataclasses.field(metadata={"key": "min"})
+    min: dataclasses.InitVar[int]
+    minute: int = dataclasses.field(init=False)
 
-    def time(self, second: int = 0, tzinfo: datetime.timezone = None):
+    # pylint: disable=redefined-builtin
+    def __post_init__(self, min: int):
+        object.__setattr__(self, "minute", min)
+
+    def time(self, second: int = 0):
         """time"""
-        return datetime.time(self.hour, self.minute, second, tzinfo)
-
-    @classmethod
-    def from_json(cls, json: dict):
-        """from json"""
-        return cls(**_mangle_dataclass_metadata(cls, json))
+        return datetime.time(self.hour, self.minute, second)
 
 
-HourMinute.min = HourMinute(
-    hour=datetime.time.min.hour, minute=datetime.time.min.minute
-)
-HourMinute.max = HourMinute(
-    hour=datetime.time.max.hour, minute=datetime.time.max.minute
-)
+HourMinute.min = HourMinute(datetime.time.min.hour, datetime.time.min.minute)
+HourMinute.max = HourMinute(datetime.time.max.hour, datetime.time.max.minute)
 
 
-@dataclasses.dataclass(frozen=True, slots=True, kw_only=True, order=True)
-class SimpleTime(HourMinute):
-    """Simple Time"""
+class TimeJson(HourMinuteJson):
+    """Time JSON"""
 
-    min: ClassVar["SimpleTime"]
-    max: ClassVar["SimpleTime"]
-
-    second: int = dataclasses.field(metadata={"key": "sec"})
-
-    @overload
-    def __init__(self, *, hour: int, minute: int, second: int) -> None:
-        ...
-
-    # pylint: disable=arguments-differ
-    def time(self, tzinfo: datetime.timezone = None):
-        """time"""
-        super().time(self.second, tzinfo)
+    sec: int
 
 
-SimpleTime.min = SimpleTime(
-    hour=datetime.time.min.hour,
-    minute=datetime.time.min.minute,
-    second=datetime.time.min.second,
-)
-SimpleTime.max = SimpleTime(
-    hour=datetime.time.max.hour,
-    minute=datetime.time.max.minute,
-    second=datetime.time.min.second,
-)
+class DateTimeJson(DateJson, TimeJson):
+    """Date Time JSON"""
 
 
-@dataclasses.dataclass(frozen=True, slots=True, kw_only=True, order=True)
-class SimpleDateTime(SimpleTime, SimpleDate):
-    """Simple DateTime"""
-
-    min: ClassVar["SimpleDateTime"]
-    max: ClassVar["SimpleDateTime"]
-
-    @overload
-    def __init__(
-        self, *, year: int, month: int, day: int, hour: int, minute: int, second: int
-    ) -> None:
-        ...
-
-    def datetime(self, tzinfo: datetime.timezone = None):
-        """datetime"""
-        return datetime.datetime(self.date(), self.time(tzinfo))
-
-    @classmethod
-    def combine(
-        cls, date: SimpleDate, time: SimpleTime  # pylint: disable=redefined-outer-name
-    ):
-        """combine date and time"""
-        return cls(
-            year=date.year,
-            month=date.month,
-            day=date.day,
-            hour=time.hour,
-            minute=time.minute,
-            second=time.second,
-        )
+@overload
+def from_json(
+    tzinfo: datetime.timezone = None, **kwargs: Unpack[DateTimeJson]
+) -> datetime.datetime:
+    ...
 
 
-def date(value: datetime.date | SimpleDate):
+@overload
+def from_json(**kwargs: Unpack[DateJson]) -> datetime.date:
+    ...
+
+
+@overload
+def from_json(**kwargs: Unpack[YearMonthJson]) -> YearMonth:
+    ...
+
+
+@overload
+def from_json(**kwargs: Unpack[TimeJson]) -> datetime.time:
+    ...
+
+
+@overload
+def from_json(**kwargs: Unpack[HourMinuteJson]) -> HourMinute:
+    ...
+
+
+def from_json(*_, tzinfo: datetime.timezone = None, **kwargs: Unpack[DateTimeJson]):
+    """get date/time from json"""
+    (year, month, day, hour, minute, second) = (
+        kwargs.get("year"),
+        kwargs.get("mon", kwargs.get("month")),
+        kwargs.get("day"),
+        kwargs.get("hour"),
+        kwargs.get("min", kwargs.get("minute")),
+        kwargs.get("sec", kwargs.get("second")),
+    )
+    if year is not None:
+        if day is None:
+            __date = YearMonth(year, month or 1)
+        else:
+            __date = datetime.date(year, month, day)
+    else:
+        __date = None
+    if hour is not None:
+        if second is None and __date is None:
+            __time = HourMinute(hour, minute or 0)
+        else:
+            __time = datetime.time(hour, minute or 0, second or 0)
+    else:
+        return __date
+    if __date is None:
+        return __time
+    return datetime.datetime.combine(date(__date), time(__time), tzinfo)
+
+
+@overload
+def prev_month(value: YearMonth) -> YearMonth:
+    ...
+
+
+@overload
+def prev_month(value: datetime.date) -> datetime.date:
+    ...
+
+
+@overload
+def prev_month(value: datetime.datetime) -> datetime.datetime:
+    ...
+
+
+@overload
+def prev_month(year: int, month: int) -> tuple[int, int]:
+    ...
+
+
+def prev_month(*args):
+    """advance one month"""
+    year: int
+    month: int
+    if len(args) < 1:
+        return ()
+    if len(args) > 1:
+        (year, month) = args
+    elif isinstance(args[0], (YearMonth, datetime.date)):
+        year = args[0].year
+        month = args[0].month
+
+    if month < 2:
+        year -= 1
+        month = 12
+    else:
+        month -= 1
+
+    if isinstance(args[0], (YearMonth, datetime.date)):
+        return args[0].replace(year, month)
+    return (year, month) + args[2:]
+
+
+@overload
+def next_month(value: YearMonth) -> YearMonth:
+    ...
+
+
+@overload
+def next_month(value: datetime.date) -> datetime.date:
+    ...
+
+
+@overload
+def next_month(value: datetime.datetime) -> datetime.datetime:
+    ...
+
+
+@overload
+def next_month(year: int, month: int) -> tuple[int, int]:
+    ...
+
+
+def next_month(*args):
+    """advance one month"""
+    year: int
+    month: int
+    if len(args) < 1:
+        return ()
+    if len(args) > 1:
+        (year, month) = args
+    elif isinstance(args[0], (YearMonth, datetime.date)):
+        year = args[0].year
+        month = args[0].month
+
+    if month > 11:
+        year += 1
+        month = 1
+    else:
+        month += 1
+
+    if isinstance(args[0], (YearMonth, datetime.date)):
+        return args[0].replace(year, month)
+    return (year, month) + args[2:]
+
+
+def date(value: datetime.date | YearMonth):
     """Get date only"""
-    if isinstance(value, (datetime.datetime, SimpleDate)):
+    if isinstance(value, (datetime.datetime, YearMonth)):
         return value.date()
     return value
 
 
-def time(value: datetime.time | SimpleTime):
+def time(value: datetime.time | datetime.datetime | HourMinute):
     """Get time only"""
-    if isinstance(value, (datetime.datetime, SimpleTime)):
+    if isinstance(value, (datetime.datetime, HourMinute)):
         return value.time()
     return value
 
@@ -216,72 +267,51 @@ def time(value: datetime.time | SimpleTime):
 class MangleOptions(NamedTuple):
     """Mangle Options"""
 
-    prefix: str | None
-    suffix: str | None
-    title_case: bool | None
+    prefix: str | None = None
+    suffix: str | None = None
+    title_case: bool | None = None
 
 
 def _mangle_key(key: str, options: MangleOptions):
-    if options.prefix and key.startswith(options.prefix):
-        key = key[len(options.prefix) :]
-    if options.suffix and key.endswith(options.suffix):
-        key = key[: -len(options.suffix)]
     if options.title_case:
         key = key.lower()
+    if options.prefix:
+        if not key.startswith(options.prefix):
+            return None
+        key = key[len(options.prefix) :]
+    if options.suffix:
+        if not key.endswith(options.suffix):
+            return None
+        key = key[: -len(options.suffix)]
     return key
 
 
-@overload
-def mangle(prefix: str, __dict: dict, /) -> dict:
-    ...
-
-
-@overload
-def mangle(prefix: str, **kwargs: any) -> dict:
-    ...
-
-
-@overload
-def mangle(prefix: str | None, suffix: str, __dict: dict, /) -> dict:
-    ...
-
-
-@overload
-def mangle(prefix: str | None, suffix: str, **kwargs) -> dict:
-    ...
-
-
-@overload
-def mangle(
-    prefix: str | None, suffix: str | None, title_case: bool | None, __dict: dict, /
-) -> dict:
-    ...
-
-
-@overload
-def mangle(prefix: str | None, suffix: str, title_case: bool | None, **kwargs) -> dict:
-    ...
-
-
-def mangle(*args, **kwargs):
+def mangle(options: MangleOptions, **kwargs: any):
     """get mangled subview of dictionary"""
-    options = MangleOptions(
-        *(arg for arg in args if arg is None or isinstance(arg, (str, bool)))
-    )
-    if len(args) > 0 and isinstance(args[-1], dict):
-        kwargs.update(args[-1])
+
     return {
         mkey: value
         for key, value in kwargs.items()
-        if (mkey := _mangle_key(key, options)) != key
+        if (mkey := _mangle_key(key, options))
     }
 
 
-@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class _DstRule(HourMinute):
-    month: int = dataclasses.field(metadata={"key": "mon"})
+    sec: dataclasses.InitVar[int]
+    second: int = dataclasses.field(init=False)
+    month: int = dataclasses.field(init=False)
+    mon: dataclasses.InitVar[int]
     week: int
     weekday: int
+
+    # pylint: disable=redefined-builtin
+    # pylint: disable=arguments-differ
+    def __post_init__(self, min: int, sec: int, mon: int):
+        # super broken
+        HourMinute.__post_init__(self, min)
+        object.__setattr__(self, "second", sec)
+        object.__setattr__(self, "month", mon)
 
     def datetime(self, year: int):
         """datetime"""
@@ -289,7 +319,9 @@ class _DstRule(HourMinute):
         delta = datetime.timedelta(weeks=self.week, days=self.weekday)
         delta -= datetime.timedelta(days=__date.weekday())
         __date += delta
-        return datetime.datetime.combine(__date, datetime.time(self.hour, self.minute))
+        return datetime.datetime.combine(
+            __date, datetime.time(self.hour, self.minute, self.second)
+        )
 
 
 USING_KEY: Final = str()
@@ -379,8 +411,13 @@ class Timezone(datetime.tzinfo):
         self._hr_chg = datetime.timedelta(hours=dst["offset"])
         # Reolink does positive offest python expects a negative one
         self._ofs = datetime.timedelta(seconds=-__time["timeZone"])
-        self._start = _DstRule.from_json(mangle("start", dst))
-        self._end = _DstRule.from_json(mangle("end", dst))
+        self._start = _DstRule(
+            **mangle(
+                MangleOptions("start", title_case=True),
+                **dst,
+            )
+        )
+        self._end = _DstRule(**mangle(MangleOptions("end", title_case=True), **dst))
         self._point_cache: dict[int, (datetime, datetime)] = {}
 
     def tzname(self, __dt: datetime.datetime | None) -> str | None:

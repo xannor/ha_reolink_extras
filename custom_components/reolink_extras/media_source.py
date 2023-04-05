@@ -101,10 +101,8 @@ class ReolinkMediaSource(MediaSource):
         depth: int,
     ):
         cache = async_get_search_cache(self.hass, device.entry_id, channel)
-        if not cache.ready:
-            await cache.async_update()
-        while not cache.at_start:
-            await
+        vod_range = await cache.async_find_start()
+
         # since we can only search by a limited date range, and the search
         # can provide hints to which months have videos, we will search
         # as far as we can and cache that as this would only change

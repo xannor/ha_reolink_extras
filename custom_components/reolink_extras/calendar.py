@@ -90,7 +90,11 @@ class ReolinkVODCalendar(ReolinkCoordinatorEntity, CalendarEntity):
     @property
     def event(self) -> CalendarEvent | None:
         if file := self._cache.get(self._cache.last):
-            return CalendarEvent(file.start, file.end, file.name)
+            return CalendarEvent(
+                file.start,
+                file.end,
+                "Motion Event",
+            )
 
         return None
 
@@ -102,12 +106,13 @@ class ReolinkVODCalendar(ReolinkCoordinatorEntity, CalendarEntity):
     ) -> list[CalendarEvent]:
         results = self._cache.async_search(start_date, end_date)
         return [
-            CalendarEvent(file.start, file.end, file.name) async for file in results
+            CalendarEvent(file.start, file.end, "Motion Event")
+            async for file in results
         ]
 
     async def async_added_to_hass(self) -> None:
         """Entity created."""
-        await self._cache.async_update(self.hass)
+        await self._cache.async_update()
         await super().async_added_to_hass()
         self.async_on_remove(
             async_dispatcher_connect(

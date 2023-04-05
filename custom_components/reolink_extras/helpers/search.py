@@ -2,8 +2,12 @@
 
 import dataclasses
 import datetime
+from enum import Enum, auto
+import struct
+from types import MappingProxyType
 from typing import (
     TYPE_CHECKING,
+    Final,
     Mapping,
     Sequence,
 )
@@ -31,16 +35,22 @@ def _table_days(table: str):
     return tuple(i for i, flag in enumerate(table, start=1) if flag == "1")
 
 
-@dataclasses.dataclass(frozen=True, slots=True, kw_only=True, order=True)
+@dataclasses.dataclass(frozen=True, slots=True, order=True)
 class SearchStatus(dt.YearMonth, Sequence[datetime.date]):
     """Search Status"""
 
-    days: tuple[int, ...] = dataclasses.field(
-        metadata={"key": "table", "transform": _table_days}
-    )
+    days: tuple[int, ...] = dataclasses.field(init=False)
+    table: dataclasses.InitVar[str]
+
+    # pylint: disable=arguments-differ
+    def __post_init__(self, mon: int, table: str):
+        # super seems broken here
+        dt.YearMonth.__post_init__(self, mon)
+        days = tuple(i for i, flag in enumerate(table, start=1) if flag == "1")
+        object.__setattr__(self, "days", days)
 
     def __getitem__(self, __index: SupportsIndex):
-        return datetime.date(self.year, self.month, self.days[__index])
+        return self.date(self.days[__index])
 
     def __len__(self):
         return len(self.days)
@@ -50,7 +60,7 @@ class SearchStatus(dt.YearMonth, Sequence[datetime.date]):
             return isinstance(value, int) and value in self.days
         if self.year != value.year or self.month != value.month:
             return False
-        if not isinstance(value, (dt.SimpleDate, datetime.date)):
+        if not isinstance(value, datetime.date):
             if isinstance(value, SearchStatus):
                 return value == self or set(value.days).issubset(self.days)
             return False
@@ -61,44 +71,75 @@ class SearchStatus(dt.YearMonth, Sequence[datetime.date]):
             yield self.date(day)
 
 
-@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class _SearchFileInfo:
-    frame_rate: int = dataclasses.field(metadata={"key": "frameRate"})
+    frame_rate: int = dataclasses.field(init=False)
+    frameRate: dataclasses.InitVar[int]
     width: int
     height: int
     size: int
     type: str
+    name: dataclasses.InitVar[str]
 
-    @classmethod
-    def from_json(cls, json: dict):
-        """from json"""
-        # pylint: disable=protected-access
-        return cls(**dt._mangle_dataclass_metadata(cls, json))
+    # pylint: disable=invalid-name
+    def __post_init__(self, frameRate: int, name: str):
+        object.__setattr__(self, "frame_rate", frameRate)
+        (*path, file) = name.split("/")
+        (file, ext) = file.split(".", 2)
+        (name, start_date, start_time, end_time, *parts) = file.split("_")
+        bits = struct.unpack("!xxxxbbbbbbbbbbbb", parts[0])
 
 
-@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class SearchFile:
     """Search File"""
 
     name: str
-    start: dt.SimpleDateTime = dataclasses.field(
-        metadata={"key": "StartTime", "transform": dt.SimpleDateTime.from_json}
-    )
-    info: _SearchFileInfo = dataclasses.field(
-        metadata={"transform": _SearchFileInfo.from_json}
-    )
-    end: dt.SimpleDateTime = dataclasses.field(
-        metadata={"key": "EndTime", "transform": dt.SimpleDateTime.from_json}
-    )
-
-    @classmethod
-    def from_json(cls, json: dict):
-        """from json"""
-        # pylint: disable=protected-access
-        return cls(**dt._mangle_dataclass_metadata(cls, json))
+    info: _SearchFileInfo
 
 
-class SearchCache(Mapping[datetime.datetime, SearchFile]):
+class StreamTypes(Enum):
+    """Stream Types"""
+
+    MAIN = auto()
+    SUB = auto()
+    EXT = auto()
+
+
+_API_STREAM_MAP: Final = {
+    StreamTypes.MAIN: "main",
+    StreamTypes.SUB: "sub",
+    StreamTypes.EXT: "ext",
+}
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class SearchResult:
+    """Search Result"""
+
+    _stream: dict[StreamTypes, SearchFile] = dataclasses.field(
+        default_factory=dict, init=False
+    )
+    stream: Mapping[StreamTypes, SearchFile] = dataclasses.field(init=False)
+    tzinfo: dataclasses.InitVar[datetime.timezone]
+    StartTime: dataclasses.InitVar[dt.DateTimeJson]
+    start: datetime.datetime = dataclasses.field(init=False)
+    Endtime: dataclasses.InitVar[dt.DateTimeJson]
+    end: datetime.datetime = dataclasses.field(init=False)
+
+    # pylint: disable = invalid-name
+    def __post_init__(
+        self,
+        tzinfo: datetime.timezone,
+        StartTime: dt.DateTimeJson,
+        EndTime: dt.DateTimeJson,
+    ):
+        object.__setattr__(self, "stream", MappingProxyType(self._stream))
+        object.__setattr__(self, "start", dt.from_json(tzinfo=tzinfo, **StartTime))
+        object.__setattr__(self, "end", dt.from_json(tzinfo=tzinfo, **EndTime))
+
+
+class SearchCache(Mapping[datetime.datetime, SearchResult]):
     """Reolink Search Cache"""
 
     def __init__(
@@ -113,7 +154,7 @@ class SearchCache(Mapping[datetime.datetime, SearchFile]):
         self._statuses_max = dt.YearMonth.min
         self._hard_start = dt.YearMonth.min
 
-        self._files: dict[datetime.datetime, SearchFile] = {}
+        self._files: dict[datetime.datetime, SearchResult] = {}
         self._files_by_day: dict[datetime.date, list[datetime.datetime]] = {}
         self._files_min = datetime.datetime.max
         self._files_max = datetime.datetime.min
@@ -136,8 +177,8 @@ class SearchCache(Mapping[datetime.datetime, SearchFile]):
     def items(self):
         return self._files.items()
 
-    @property
-    def _timezone(self) -> dt.Timezone:
+    def timezone(self) -> dt.Timezone:
+        """Camera Timezone"""
         # pylint: disable=protected-access
         return dt.Timezone.get(**self._host._time_settings)
 
@@ -158,11 +199,11 @@ class SearchCache(Mapping[datetime.datetime, SearchFile]):
         self,
         start: datetime.date,
         end: datetime.date | None = None,
-        stream: str = None,
+        stream=StreamTypes.MAIN,
         status_only=False,
     ):
         if isinstance(start, datetime.datetime) and start.tzinfo is not None:
-            start = start.astimezone(self._timezone)
+            start = start.astimezone(self.timezone())
         if end is None:
             end = dt.date(start)
         if not isinstance(start, datetime.datetime):
@@ -171,35 +212,35 @@ class SearchCache(Mapping[datetime.datetime, SearchFile]):
         if not isinstance(end, datetime.datetime):
             end = datetime.datetime.combine(end, datetime.time.max)
         elif end.tzinfo is not None:
-            end = end.astimezone(self._timezone)
+            end = end.astimezone(self.timezone())
 
         (statuses, files) = await self._host.request_vod_files(
-            self._channel, start, end, status_only, stream
+            self._channel, start, end, status_only, _API_STREAM_MAP[stream]
         )
         if statuses is None:
             return False
         for status in statuses:
-            _status = SearchStatus.from_json(status)
-            key = dt.YearMonth(year=_status.year, month=_status.month)
-            if self._statuses_min > key:
-                self._statuses_min = key
-            if self._statuses_max < key:
-                self._statuses_max = key
+            _status = SearchStatus(**status)
+            key = dt.YearMonth(_status.year, _status.month)
+            self._statuses_min = min(self._statuses_min, key)
+            self._statuses_max = max(self._statuses_max, key)
             self._statuses[key] = _status
         if files is None:
             return True
         needs_sort: set[list] = set()
         for file in files:
-            _file = SearchFile.from_json(file)
-            key = _file.start.datetime(self._timezone)
-            if self._files_min > key:
-                self._files_min = key
-            if self._files_max < key:
-                self._files_max = key
-            self._files[key] = _file
-            by_day = self._files_by_day.setdefault(key.date(), [])
-            by_day.append(key)
-            needs_sort.add(by_day)
+            key = dt.from_json(tzinfo=self.timezone(), **file["StartTime"])
+            self._files_min = min(self._files_min, key)
+            self._files_max = max(self._files_max, key)
+            if (_file := self._files.get(key)) is None:
+                result = SearchResult(**file)
+                _file = self._files.setdefault(key, result)
+                if _file == result:
+                    by_day = self._files_by_day.setdefault(key.date(), [])
+                    by_day.append(key)
+                    needs_sort.add(by_day)
+            # pylint: disable = protected-access
+            _file._stream[stream] = SearchFile(**file)
         for item in needs_sort:
             item.sort()
 
@@ -208,7 +249,7 @@ class SearchCache(Mapping[datetime.datetime, SearchFile]):
         month = self._statuses_min
         if month > self._statuses_max:
             today = self.today()
-            month = dt.YearMonth(year=today.year, month=today.month)
+            month = dt.YearMonth(today.year, today.month)
 
         while self._hard_start != month:
             await self._async_host_search(
@@ -274,11 +315,7 @@ class SearchCache(Mapping[datetime.datetime, SearchFile]):
                 (date, *time) = date
 
             if (
-                (
-                    status := self._statuses.get(
-                        dt.YearMonth(year=date.year, month=date.month)
-                    )
-                )
+                (status := self._statuses.get(dt.YearMonth(date.year, date.month)))
                 is not None
                 and date in status
                 and (files := self._files_by_day.get(date))

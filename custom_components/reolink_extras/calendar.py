@@ -14,7 +14,9 @@ from homeassistant.components.calendar import CalendarEntity, CalendarEvent
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
 from homeassistant.components.reolink import ReolinkData
-from homeassistant.components.reolink.entity import ReolinkCoordinatorEntity
+from homeassistant.components.reolink.entity import ReolinkChannelCoordinatorEntity
+
+from homeassistant.util import dt
 
 from reolink_aio.api import Host
 
@@ -67,7 +69,7 @@ async def async_setup_entry(
     await async_forward_reolink_entries(hass, setup_entry)
 
 
-class ReolinkVODCalendar(ReolinkCoordinatorEntity, CalendarEntity):
+class ReolinkVODCalendar(ReolinkChannelCoordinatorEntity, CalendarEntity):
     """Reolink VOD Calendar"""
 
     entity_description: ReolinkCalendarEntityDescription
@@ -91,9 +93,9 @@ class ReolinkVODCalendar(ReolinkCoordinatorEntity, CalendarEntity):
     def event(self) -> CalendarEvent | None:
         if file := self._cache.get(self._cache.last):
             return CalendarEvent(
-                file.start,
-                file.end,
-                "Motion Event",
+                dt.as_local(file.start),
+                dt.as_local(file.end),
+                f"{file.best_stream.trigger} Event",
             )
 
         return None
@@ -106,7 +108,11 @@ class ReolinkVODCalendar(ReolinkCoordinatorEntity, CalendarEntity):
     ) -> list[CalendarEvent]:
         results = self._cache.async_search(start_date, end_date)
         return [
-            CalendarEvent(file.start, file.end, "Motion Event")
+            CalendarEvent(
+                dt.as_local(file.start),
+                dt.as_local(file.end),
+                f"{file.best_stream.trigger} Event",
+            )
             async for file in results
         ]
 

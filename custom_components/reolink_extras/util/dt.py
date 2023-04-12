@@ -6,24 +6,15 @@ from typing import (
     ClassVar,
     Final,
     Generic,
+    Mapping,
     NamedTuple,
     Sequence,
     TypedDict,
     overload,
 )
-from typing_extensions import (
-    SupportsIndex,
-    TypeVar,
-    Unpack,
-)
+from typing_extensions import SupportsIndex, TypeVar, Unpack, NotRequired
 
-
-class YearMonthJson(TypedDict):
-    """YeaRMonth JSON"""
-
-    year: int
-    mon: int
-    """month"""
+from .dataclasses import unpack_from_json
 
 
 @dataclasses.dataclass(slots=True, frozen=True, order=True)
@@ -34,11 +25,7 @@ class YearMonth:
     max: ClassVar["YearMonth"]
 
     year: int
-    mon: dataclasses.InitVar[int]
-    month: int = dataclasses.field(init=False)
-
-    def __post_init__(self, mon: int):
-        object.__setattr__(self, "month", mon)
+    month: int = dataclasses.field(default=1, metadata={"json": "mon"})
 
     def date(self, day=1):
         """Return as date"""
@@ -56,22 +43,14 @@ class YearMonth:
             month = self.month
         return type(self)(year, month)
 
+    @classmethod
+    def from_json(cls, json: Mapping[str, any] = None, /, **kwargs: any):
+        """from json"""
+        return unpack_from_json(cls, json, **kwargs)
+
 
 YearMonth.max = YearMonth(datetime.date.max.year, datetime.date.max.month)
 YearMonth.min = YearMonth(datetime.date.min.year, datetime.date.min.month)
-
-
-class DateJson(YearMonthJson):
-    """Date JSON"""
-
-    day: int
-
-
-class HourMinuteJson(TypedDict):
-    """Hour Minute JSON"""
-
-    hour: int
-    min: int
 
 
 @dataclasses.dataclass(frozen=True, slots=True, order=True)
@@ -98,45 +77,181 @@ HourMinute.min = HourMinute(datetime.time.min.hour, datetime.time.min.minute)
 HourMinute.max = HourMinute(datetime.time.max.hour, datetime.time.max.minute)
 
 
-class TimeJson(HourMinuteJson):
+class YearMonthJSON(TypedDict):
+    """Year/Month JSON"""
+
+    year: int
+    mon: int
+
+
+class YearMonthKWArgs(TypedDict):
+    """Year/Month keyword Args"""
+
+    year: int
+    month: NotRequired[int]
+
+
+class DateJSON(YearMonthJSON):
+    """Date JSON"""
+
+    day: int
+
+
+class DateKWArgs(YearMonthKWArgs):
+    """Date keyword args"""
+
+    month: int
+    day: NotRequired[int]
+
+
+class HourMinuteJSON(TypedDict):
+    """Hour/Minute JSON"""
+
+    hour: int
+    min: int
+
+
+class HourMinuteKWArgs(TypedDict):
+    """Hour/Minute keyword arguments"""
+
+    hour: int
+    minute: NotRequired[int]
+
+
+class TimeJSON(HourMinuteJSON):
     """Time JSON"""
 
     sec: int
 
 
-class DateTimeJson(DateJson, TimeJson):
-    """Date Time JSON"""
+class TimeKWArgs(HourMinuteKWArgs):
+    """Time keyword arguments"""
+
+    minute: int
+    second: NotRequired[int]
+
+
+class DateTimeJSON(DateJSON, TimeJSON):
+    """Datetime JSON"""
+
+
+class DateTimeKWArgs(DateKWArgs, TimeKWArgs):
+    """Datetime keywork arguments"""
+
+    day: int
 
 
 @overload
+def from_json(json: YearMonthJSON, /) -> YearMonth:
+    ...
+
+
+@overload
+def from_json(**kwargs: Unpack[YearMonthJSON]) -> YearMonth:
+    ...
+
+
+@overload
+def from_json(json: YearMonthKWArgs, /) -> YearMonth:
+    ...
+
+
+@overload
+def from_json(**kwargs: Unpack[YearMonthKWArgs]) -> YearMonth:
+    ...
+
+
+@overload
+def from_json(json: DateJSON, /) -> datetime.date:
+    ...
+
+
+@overload
+def from_json(**kwargs: Unpack[DateJSON]) -> datetime.date:
+    ...
+
+
+@overload
+def from_json(json: DateKWArgs, /) -> datetime.date:
+    ...
+
+
+@overload
+def from_json(**kwargs: Unpack[DateKWArgs]) -> datetime.date:
+    ...
+
+
+@overload
+def from_json(json: DateTimeJSON, /) -> datetime.datetime:
+    ...
+
+
+@overload
+def from_json(**kwargs: Unpack[DateTimeJSON]) -> datetime.datetime:
+    ...
+
+
+@overload
+def from_json(json: DateTimeKWArgs, /) -> datetime.datetime:
+    ...
+
+
+@overload
+def from_json(**kwargs: Unpack[DateTimeKWArgs]) -> datetime.datetime:
+    ...
+
+
+@overload
+def from_json(json: TimeJSON, /) -> datetime.time:
+    ...
+
+
+@overload
+def from_json(**kwargs: Unpack[TimeJSON]) -> datetime.time:
+    ...
+
+
+@overload
+def from_json(json: TimeKWArgs, /) -> datetime.time:
+    ...
+
+
+@overload
+def from_json(**kwargs: Unpack[TimeKWArgs]) -> datetime.time:
+    ...
+
+
+@overload
+def from_json(json: HourMinuteJSON, /) -> HourMinute:
+    ...
+
+
+@overload
+def from_json(**kwargs: Unpack[HourMinuteJSON]) -> HourMinute:
+    ...
+
+
+@overload
+def from_json(json: HourMinuteKWArgs, /) -> HourMinute:
+    ...
+
+
+@overload
+def from_json(**kwargs: Unpack[HourMinuteKWArgs]) -> HourMinute:
+    ...
+
+
 def from_json(
-    tzinfo: datetime.timezone = None, **kwargs: Unpack[DateTimeJson]
-) -> datetime.datetime:
-    ...
-
-
-@overload
-def from_json(**kwargs: Unpack[DateJson]) -> datetime.date:
-    ...
-
-
-@overload
-def from_json(**kwargs: Unpack[YearMonthJson]) -> YearMonth:
-    ...
-
-
-@overload
-def from_json(**kwargs: Unpack[TimeJson]) -> datetime.time:
-    ...
-
-
-@overload
-def from_json(**kwargs: Unpack[HourMinuteJson]) -> HourMinute:
-    ...
-
-
-def from_json(*_, tzinfo: datetime.timezone = None, **kwargs: Unpack[DateTimeJson]):
+    json: dict[str, any] = None,
+    /,
+    *,
+    tzinfo: datetime.timezone = None,
+    **kwargs: Unpack[DateTimeJSON],
+):
     """get date/time from json"""
+    if json is not None:
+        kwargs.update(json)
+
     (year, month, day, hour, minute, second) = (
         kwargs.get("year"),
         kwargs.get("mon", kwargs.get("month")),

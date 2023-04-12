@@ -2,7 +2,7 @@
 
 import dataclasses
 import datetime
-from enum import Enum, auto
+from enum import Enum, IntFlag, auto
 import struct
 from types import MappingProxyType
 from typing import (
@@ -20,7 +20,7 @@ from reolink_aio.api import Host
 from ..const import DOMAIN
 from . import async_get_reolink_data
 
-
+from ..util.dataclasses import unpack_from_json
 from ..util import dt
 
 if TYPE_CHECKING:
@@ -29,9 +29,7 @@ if TYPE_CHECKING:
 T = TypeVar("T", infer_variance=True)
 
 
-def _table_days(table: str):
-    if not isinstance(table, str):
-        return table
+def _days_table(table: str):
     return tuple(i for i, flag in enumerate(table, start=1) if flag == "1")
 
 
@@ -39,15 +37,9 @@ def _table_days(table: str):
 class SearchStatus(dt.YearMonth, Sequence[datetime.date]):
     """Search Status"""
 
-    days: tuple[int, ...] = dataclasses.field(init=False)
-    table: dataclasses.InitVar[str]
-
-    # pylint: disable=arguments-differ
-    def __post_init__(self, mon: int, table: str):
-        # super seems broken here
-        dt.YearMonth.__post_init__(self, mon)
-        days = tuple(i for i, flag in enumerate(table, start=1) if flag == "1")
-        object.__setattr__(self, "days", days)
+    days: tuple[int, ...] = dataclasses.field(
+        default_factory=tuple, metadata={"json": "table", "transform": _days_table}
+    )
 
     def __getitem__(self, __index: SupportsIndex):
         return self.date(self.days[__index])
@@ -71,23 +63,13 @@ class SearchStatus(dt.YearMonth, Sequence[datetime.date]):
             yield self.date(day)
 
 
-@dataclasses.dataclass(frozen=True, slots=True)
-class _SearchFileInfo:
-    frame_rate: int = dataclasses.field(init=False)
-    frameRate: dataclasses.InitVar[int]
-    width: int
-    height: int
-    size: int
-    type: str
-    name: dataclasses.InitVar[str]
-
-    # pylint: disable=invalid-name
-    def __post_init__(self, frameRate: int, name: str):
-        object.__setattr__(self, "frame_rate", frameRate)
-        (*path, file) = name.split("/")
-        (file, ext) = file.split(".", 2)
-        (name, start_date, start_time, end_time, *parts) = file.split("_")
-        bits = struct.unpack("!xxxxbbbbbbbbbbbb", parts[0])
+class Triggers(IntFlag):
+    NONE = 0
+    MOTION = auto()
+    TIMER = auto()
+    PERSION = auto()
+    VEHICLE = auto()
+    PET = auto()
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -95,7 +77,34 @@ class SearchFile:
     """Search File"""
 
     name: str
-    info: _SearchFileInfo
+    frame_rate: int = dataclasses.field(metadata={"json": "frameRate"})
+    trigger: Triggers = dataclasses.field(default=Triggers.NONE, init=False)
+    width: int
+    height: int
+    size: int
+    type: str
+
+    # pylint: disable=invalid-name
+    def __post_init__(self):
+        (*_path, file) = self.name.split("/")
+        (file, _ext) = file.split(".", 2)
+        (_name, _start_date, _start_time, _end_time, *parts) = file.split("_")
+        (a, b, c) = (int(p, 16) for p in parts[0][4:])
+        trigger = self.trigger
+        if a & 8 == 8 or c & 8 == 8:
+            trigger |= Triggers.MOTION
+        if a & 4 == 4:
+            trigger |= Triggers.PERSION
+        if b & 1 == 1:
+            trigger |= Triggers.TIMER
+        if b & 4 == 4:
+            trigger |= Triggers.PET
+        object.__setattr__(self, "trigger", trigger)
+
+    @classmethod
+    def from_json(cls, json: Mapping[str, any] = None, /, **kwargs: any):
+        """from json"""
+        return unpack_from_json(cls, json, **kwargs)
 
 
 class StreamTypes(Enum):
@@ -121,22 +130,48 @@ class SearchResult:
         default_factory=dict, init=False
     )
     stream: Mapping[StreamTypes, SearchFile] = dataclasses.field(init=False)
-    tzinfo: dataclasses.InitVar[datetime.timezone]
-    StartTime: dataclasses.InitVar[dt.DateTimeJson]
-    start: datetime.datetime = dataclasses.field(init=False)
-    Endtime: dataclasses.InitVar[dt.DateTimeJson]
-    end: datetime.datetime = dataclasses.field(init=False)
+    start: datetime.datetime = dataclasses.field(
+        metadata={"json": "StartTime", "transform": dt.from_json}
+    )
+    end: datetime.datetime = dataclasses.field(
+        metadata={"json": "EndTime", "transform": dt.from_json}
+    )
+    tzinfo: dataclasses.InitVar[datetime.timezone] = dataclasses.field(
+        default=None, kw_only=True
+    )
 
     # pylint: disable = invalid-name
     def __post_init__(
         self,
-        tzinfo: datetime.timezone,
-        StartTime: dt.DateTimeJson,
-        EndTime: dt.DateTimeJson,
+        tzinfo: datetime.timezone = None,
     ):
         object.__setattr__(self, "stream", MappingProxyType(self._stream))
-        object.__setattr__(self, "start", dt.from_json(tzinfo=tzinfo, **StartTime))
-        object.__setattr__(self, "end", dt.from_json(tzinfo=tzinfo, **EndTime))
+        if tzinfo is not None:
+            if self.start.tzinfo != tzinfo:
+                object.__setattr__(self, "start", self.start.replace(tzinfo=tzinfo))
+            if self.end.tzinfo != tzinfo:
+                object.__setattr__(self, "end", self.end.replace(tzinfo=tzinfo))
+
+    @property
+    def best_stream(self):
+        return self._stream.get(
+            StreamTypes.MAIN,
+            self._stream.get(StreamTypes.SUB, self._stream.get(StreamTypes.EXT)),
+        )
+
+    @classmethod
+    def from_json(
+        cls,
+        json: Mapping[str, any] = None,
+        /,
+        *,
+        tzinfo: datetime.tzinfo = None,
+        **kwargs: any,
+    ):
+        """from json"""
+        if tzinfo is not None:
+            kwargs["tzinfo"] = tzinfo
+        return unpack_from_json(cls, json, **kwargs)
 
 
 class SearchCache(Mapping[datetime.datetime, SearchResult]):
@@ -220,27 +255,28 @@ class SearchCache(Mapping[datetime.datetime, SearchResult]):
         if statuses is None:
             return False
         for status in statuses:
-            _status = SearchStatus(**status)
+            _status = SearchStatus.from_json(status)
             key = dt.YearMonth(_status.year, _status.month)
             self._statuses_min = min(self._statuses_min, key)
             self._statuses_max = max(self._statuses_max, key)
             self._statuses[key] = _status
         if files is None:
             return True
-        needs_sort: set[list] = set()
+        needs_sort: list[list] = []
         for file in files:
-            key = dt.from_json(tzinfo=self.timezone(), **file["StartTime"])
+            key = dt.from_json(file["StartTime"])
             self._files_min = min(self._files_min, key)
             self._files_max = max(self._files_max, key)
             if (_file := self._files.get(key)) is None:
-                result = SearchResult(**file)
+                result = SearchResult.from_json(file, tzinfo=self.timezone())
                 _file = self._files.setdefault(key, result)
                 if _file == result:
                     by_day = self._files_by_day.setdefault(key.date(), [])
                     by_day.append(key)
-                    needs_sort.add(by_day)
+                    if by_day not in needs_sort:
+                        needs_sort.append(by_day)
             # pylint: disable = protected-access
-            _file._stream[stream] = SearchFile(**file)
+            _file._stream[stream] = SearchFile.from_json(file)
         for item in needs_sort:
             item.sort()
 

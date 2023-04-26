@@ -5,6 +5,7 @@ default_config:
 logger:
   default: info
   logs:
+    # reolink_aio: debug
     custom_components.reolink_extras: debug
 
 debugpy:

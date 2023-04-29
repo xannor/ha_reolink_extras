@@ -43,9 +43,13 @@ async def _forward_reolink_entry(
 
     if entry.state != ConfigEntryState.LOADED:
 
-        def retry(_: ConfigEntryChange, entry: ConfigEntry):
+        def retry(_: ConfigEntryChange, retry_entry: ConfigEntry):
+            if retry_entry.entry_id != entry.entry_id:
+                return
             cleanup()
-            hass.create_task(_forward_reolink_entry(hass, entry, handler, in_task=True))
+            hass.create_task(
+                _forward_reolink_entry(hass, retry_entry, handler, in_task=True)
+            )
 
         cleanup = async_dispatcher_connect(hass, SIGNAL_CONFIG_ENTRY_CHANGED, retry)
         if not in_task:

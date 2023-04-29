@@ -60,17 +60,6 @@ async def async_get_media_source(hass: HomeAssistant):
     return source
 
 
-def _calc_device_utcnow(time_settings: dict):
-    time = time_settings.get("Time")
-    if not time:
-        return datetime.utcnow()
-    now = datetime(
-        time["year"], time["mon"], time["day"], time["hour"], time["min"], time["sec"]
-    )
-    offset = timedelta(seconds=time["timeZone"])
-    return now + offset
-
-
 class ReolinkMediaSource(MediaSource):
     """Provide Reolink camera recordings as media sources."""
 

@@ -1,14 +1,13 @@
 """Typings"""
 
-from collections import OrderedDict
+import bisect
 from datetime import datetime, date, time, MINYEAR, MAXYEAR, timedelta
 
 from operator import index as _index
-from types import MappingProxyType
-from typing import ClassVar, Iterable, Iterator, Mapping, Reversible, Union, overload
+from typing import (
+    Any, ClassVar, Iterable, Iterator, Mapping, MappingView, KeysView, SupportsIndex, ValuesView, ItemsView, Reversible, Sequence, TypeVar, overload,
+)
 from reolink_aio.typings import VOD_search_status, VOD_file
-
-dict_values = type({}.values())
 
 
 def _cmp(x, y):
@@ -173,85 +172,153 @@ class yearmonth:
 yearmonth.min = yearmonth(MINYEAR, 1)
 yearmonth.max = yearmonth(MAXYEAR, 12)
 
+KT = TypeVar("KT")
+VT = TypeVar("VT")
 
-class SearchCache(Mapping[datetime, VOD_file], Reversible[datetime]):
-    "Search Cache"
+class SortedMapping(Mapping[KT, VT], Reversible[KT]):
+    """Sorted Mapping"""
 
-    __slots__ = ("_statuses", "_files", "at_start")
+    __slots__ = ("_keys", "_items")
 
-    def __init__(self):
+    def __init__(self, keys:Sequence[KT], items:Mapping[KT, VT]) -> None:
         super().__init__()
-        self._statuses: dict[yearmonth, VOD_search_status] = OrderedDict()
-        self._files: dict[date, dict[time, VOD_file]] = OrderedDict()
-        self.at_start: bool = False
-
-    def __missing__(self, key):
-        raise KeyError(key)
-
-    def __getitem__(self, __key: datetime) -> VOD_file:
-        if (__files := self._files.get(__key.date())) and (
-            __file := __files.get(__key.time())
-        ):
-            return __file
-        return self.__missing__(__key)
-
-    def __iter__(self) -> Iterator[datetime]:
-        for __date in self._files:
-            __files = self._files[__date]
-            for __time in __files:
-                yield datetime.combine(__date, __time, tzinfo=__files[__time].tzinfo)
+        self._keys = keys
+        self._items = items
 
     def __len__(self) -> int:
-        return sum((len(self._files[__date]) for __date in self._files), 0)
+        return len(self._keys)
+
+    def __getitem__(self, __key: KT) -> VT:
+        return self._items[__key]
+
+    def __iter__(self) -> Iterator[KT]:
+        return iter(self._keys)
+
+    def __reversed__(self) -> Iterator[KT]:
+        return iter(reversed(self._keys))
+
+    def __contains__(self, __key: object) -> bool:
+        return __key in self._items
+
+    def __bool__(self) -> bool:
+        return len(self._keys) > 0
+
+    def items(self):
+        return SortedItemsView(self)
+
+    def keys(self):
+        return SortedKeysView(self)
+
+    def values(self):
+        return SortedValuesView(self)
+
+class SortedKeysView(Sequence[KT], KeysView[KT, VT]):
+
+    _mapping: SortedMapping[KT, VT]
+
+    def __getitem__(self, index:SupportsIndex):
+        return self._mapping._keys[index]
+
+class SortedValuesView(Sequence[VT], ValuesView[KT, VT]):
+
+    _mapping: SortedMapping[KT, VT]
+
+    def __getitem__(self, index:SupportsIndex):
+        __key = self._mapping._keys[index]
+        return self._mapping[__key]
+
+
+class SortedItemsView(Sequence[tuple[KT, VT]], ItemsView[KT, VT]):
+
+    _mapping: SortedMapping[KT, VT]
+
+    def __getitem__(self, index:SupportsIndex):
+        __key = self._mapping._keys[index]
+        return (__key, self._mapping[__key])
+
+
+class SearchCache(SortedMapping[datetime, VOD_file]):
+    "Search Cache"
+
+    _keys: list[date]
+    _items: dict[date, tuple[list[time], dict[time, VOD_file]]]
+
+    __slots__ = ("_status_keys", "_statuses", "at_start", "at_end")
+
+    def __init__(self):
+        super().__init__([], {})
+
+        self._status_keys:list[yearmonth] = []
+        self._statuses:dict[yearmonth,VOD_search_status] = {}
+        self.at_start: bool = False
+        self.at_end: bool = False
+
+    def __getitem__(self, __key: datetime) -> VOD_file:
+        return self._items.get(__key.date())[1].get(__key.time())
+
+    def __iter__(self) -> Iterator[datetime]:
+        for __date in self._keys:
+            for __time in self._items[__date][0]:
+                yield datetime.combine(__date, __time)
+
+    def __len__(self) -> int:
+        return sum(map(lambda d: len(d[0]), self._items.values()))
 
     def __reversed__(self) -> Iterator[datetime]:
-        for __date in reversed(self._files):
-            __files = self._files[__date]
-            for __time in reversed(__files):
-                yield datetime.combine(__date, __time, tzinfo=__files[__time].tzinfo)
+        for __date in reversed(self._keys):
+            for __time in reversed(self._items[__date][0]):
+                yield datetime.combine(__date, __time)
 
     def __contains__(self, __x: datetime):
-        if __files := self._files.get(__x.date()):
-            return __x.time() in __files
+        if __files := self._items.get(__x.date()):
+            return __x.time() in __files[1]
         return False
 
-    def __bool__(self):
-        return any(self._files)
+    def _statuses_pop(self, __key: yearmonth):
+        if (status:= self._statuses.pop(__key, None)) is not None:
+            self._status_keys.remove(__key)
+        return status
+
+    def _del_item(self, __key:date):
+        if not isinstance(__key, datetime):
+            if self._items.pop(__key, None) is None:
+                self._keys.remove(__key)
+            return
+        if not (items := self._items.get(__key.date())):
+            return
+        __time = __key.time()
+        keys, files = items
+        if files.pop(__time, None):
+            keys.remove(__time)
 
     def trim(self, __key: yearmonth | date):
         """trim from cache"""
         if isinstance(__key, yearmonth):
-            if not (__status := self._statuses.pop(__key)):
+            if not (__status := self._statuses_pop(__key)):
                 return
             for __date in __status:
-                if __date in self._files:
-                    del self._files[__date]
+                self._del_item(__date)
             return
 
-        if not isinstance(__key, datetime):
-            self._files.pop(__key, None)
-            return
-
-        if not (__files := self._files.get(__key.date())):
-            return
-
-        __files.pop(__key, None)
+        self._del_item(__key)
 
     @property
     def statuses(self):
         """search statuses"""
-        return MappingProxyType(self._statuses)
+        return SortedMapping(self._status_keys, self._statuses)
 
     def slice(self, start: datetime, end: datetime):
         """get a slice of cache"""
-        _ym = max(next(iter(self._statuses), None), yearmonth.fromdate(start))
-        e_ym = min(next(reversed(self._statuses), None), yearmonth.fromdate(end))
+        if len(self._status_keys) < 1:
+            return
+        __ym = max(self._status_keys[0], yearmonth.fromdate(start))
+        end_ym = min(self._status_keys[-1], yearmonth.fromdate(end))
         start_time = start.time()
         end_time = end.time()
         first = True
 
-        while _ym <= e_ym:
-            status = self._statuses.get(_ym)
+        while __ym <= end_ym:
+            status = self._statuses.get(__ym)
             if status:
                 for __date in status:
                     if first:
@@ -259,23 +326,24 @@ class SearchCache(Mapping[datetime, VOD_file], Reversible[datetime]):
                             continue
                         if __date.day > start.day:
                             first = False
-                    if _ym == e_ym and __date.day > end.day:
+                    if __ym == end_ym and __date.day > end.day:
                         break
-                    files = self._files.get(__date)
+                    files = self._items.get(__date)
                     if not files:
                         continue
-                    for __time in files:
+                    keys, items = files
+                    for __time in keys:
                         if first:
                             if __time < start_time:
                                 continue
                             if __time >= start_time:
                                 first = False
-                        if _ym == e_ym and __date.day == end.day and __time > end_time:
+                        if __ym == end_ym and __date.day == end.day and __time > end_time:
                             break
-                        yield files[__time]
+                        yield items[__time]
 
             first = False
-            _ym += 1
+            __ym += 1
 
     def append(self, __object: VOD_search_status | VOD_file):
         """append/update status or file"""
@@ -286,14 +354,18 @@ class SearchCache(Mapping[datetime, VOD_file], Reversible[datetime]):
                     return
                 # purge any days that fall off from last status
                 for day in set(__status.days).difference(set(__object.days)):
-                    self._files.pop(__key.date(day), None)
-
+                    self._del_item(__key.date(day))
+            else:
+                bisect.insort(self._status_keys, __key)
             self._statuses[__key] = __object
-            t: MappingProxyType = {}
             return
 
-        __dict = self._files.setdefault(__object.start_time.date(), OrderedDict())
-        __dict[__object.start_time.time()] = __object
+        keys, files = self._items.setdefault(__object.start_time.date(), ([], {}))
+        __time = __object.start_time.time().replace(tzinfo=None)
+        if __time not in files:
+            bisect.insort(keys, __time)
+
+        files[__time] = __object
 
     def extend(
         self,
@@ -302,10 +374,8 @@ class SearchCache(Mapping[datetime, VOD_file], Reversible[datetime]):
     ):
         """add search results to cache"""
         if __statuses:
-            self._statuses.update(
-                ((yearmonth.fromstatus(status), status) for status in __statuses)
-            )
+            for status in __statuses:
+                self.append(status)
 
         for file in __files:
-            files = self._files.setdefault(file.start_time.date(), OrderedDict())
-            files[file.start_time.time()] = file
+            self.append(file)

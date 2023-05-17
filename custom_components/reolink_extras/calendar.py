@@ -105,7 +105,11 @@ class ReolinkVODCalendar(ReolinkChannelCoordinatorEntity, CalendarEntity):
         return self._last_event
 
     async def _cache_events(self, start_date: dtc.datetime, end_date: dtc.datetime):
-        _tz = None  # self._host.api.get_timezone()
+        _tz = self._host.api.timezone()
+        if _tz is None:
+            _tz = (await self._host.api.async_get_time()).tzinfo
+
+
         api: Host = self._host.api
         (statuses, files) = await api.request_vod_files(
             self._channel,
@@ -147,7 +151,7 @@ class ReolinkVODCalendar(ReolinkChannelCoordinatorEntity, CalendarEntity):
         end_date: dtc.datetime,
     ) -> list[CalendarEvent]:
         # check cache
-        now = dtc.datetime.now().astimezone()  # = self._host.api.get_time()
+        now = self._host.api.get_time()
         if (
             self._cache.at_start
             and (__first := next(iter(self._cache.statuses))) > start_date
@@ -269,9 +273,9 @@ class ReolinkVODCalendar(ReolinkChannelCoordinatorEntity, CalendarEntity):
             self.async_write_ha_state()
 
 
-def _file_to_event(file: VOD_file, tzinfo: dtc.tzinfo = None, name: str = None):
+def _file_to_event(file: VOD_file, name: str = None):
     return CalendarEvent(
-        dt.as_utc(file.start_time.replace(tzinfo=tzinfo)),
-        dt.as_utc(file.end_time.replace(tzinfo=tzinfo)),
+        dt.as_utc(file.start_time),
+        dt.as_utc(file.end_time),
         f"{name or ''} {file.triggers} event",
     )

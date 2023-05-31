@@ -4,9 +4,9 @@ import bisect
 from datetime import datetime, date, time, MINYEAR, MAXYEAR, timedelta
 
 from operator import index as _index
-from typing import (
-    Any, ClassVar, Iterable, Iterator, Mapping, MappingView, KeysView, SupportsIndex, ValuesView, ItemsView, Reversible, Sequence, TypeVar, overload,
-)
+import typing
+from typing_extensions import TypeVar
+
 from reolink_aio.typings import VOD_search_status, VOD_file
 
 
@@ -24,8 +24,8 @@ class yearmonth:
 
     __slots__ = ("_year", "_month", "_hashcode")
 
-    min: ClassVar["yearmonth"]
-    max: ClassVar["yearmonth"]
+    min: typing.ClassVar["yearmonth"]
+    max: typing.ClassVar["yearmonth"]
 
     def __init__(self, year: int, month: int):
         year = _index(year)
@@ -38,7 +38,7 @@ class yearmonth:
         self._hashcode = -1
 
     @classmethod
-    def fromdate(cls, __date: _date_class):
+    def fromdate(cls, __date: "_date_class|yearmonth"):
         """Construct from date"""
         return cls(__date.year, __date.month)
 
@@ -76,7 +76,7 @@ class yearmonth:
         return self._month
 
     def date(self, day: int = 1) -> date:
-        """construct date from monthyear and given day, use -1 for from end of month [-1 is last day of month]"""
+        """construct date from monthyear and given day, use - for from end of month [-1 is last day of month]"""
         if day >= 0:
             return date(self._year, self._month, day)
         return (self + 1).date() - timedelta(days=day)
@@ -102,19 +102,19 @@ class yearmonth:
 
     __radd__ = __add__
 
-    @overload
+    @typing.overload
     def __sub__(self, other: int) -> "yearmonth":
         ...
 
-    @overload
+    @typing.overload
     def __sub__(self, other: "yearmonth") -> int:
         ...
 
-    @overload
+    @typing.overload
     def __sub__(self, other: _date_class) -> int:
         ...
 
-    @overload
+    @typing.overload
     def __sub__(self, other: VOD_search_status) -> int:
         ...
 
@@ -172,124 +172,116 @@ class yearmonth:
 yearmonth.min = yearmonth(MINYEAR, 1)
 yearmonth.max = yearmonth(MAXYEAR, 12)
 
-KT = TypeVar("KT")
-VT = TypeVar("VT")
+_T = TypeVar('_T', infer_variance=True)
+_VT_co = TypeVar('_VT_co', covariant=True)
+_KT_contra = TypeVar('_KT_contra', contravariant=True)
 
-class SortedMapping(Mapping[KT, VT], Reversible[KT]):
-    """Sorted Mapping"""
+_slice_class = slice
 
-    __slots__ = ("_keys", "_items")
-
-    def __init__(self, keys:Sequence[KT], items:Mapping[KT, VT]) -> None:
-        super().__init__()
-        self._keys = keys
-        self._items = items
-
-    def __len__(self) -> int:
-        return len(self._keys)
-
-    def __getitem__(self, __key: KT) -> VT:
-        return self._items[__key]
-
-    def __iter__(self) -> Iterator[KT]:
-        return iter(self._keys)
-
-    def __reversed__(self) -> Iterator[KT]:
-        return iter(reversed(self._keys))
-
-    def __contains__(self, __key: object) -> bool:
-        return __key in self._items
-
-    def __bool__(self) -> bool:
-        return len(self._keys) > 0
-
-    def items(self):
-        return SortedItemsView(self)
-
-    def keys(self):
-        return SortedKeysView(self)
-
-    def values(self):
-        return SortedValuesView(self)
-
-class SortedKeysView(Sequence[KT], KeysView[KT, VT]):
-
-    _mapping: SortedMapping[KT, VT]
-
-    def __getitem__(self, index:SupportsIndex):
-        return self._mapping._keys[index]
-
-class SortedValuesView(Sequence[VT], ValuesView[KT, VT]):
-
-    _mapping: SortedMapping[KT, VT]
-
-    def __getitem__(self, index:SupportsIndex):
-        __key = self._mapping._keys[index]
-        return self._mapping[__key]
-
-
-class SortedItemsView(Sequence[tuple[KT, VT]], ItemsView[KT, VT]):
-
-    _mapping: SortedMapping[KT, VT]
-
-    def __getitem__(self, index:SupportsIndex):
-        __key = self._mapping._keys[index]
-        return (__key, self._mapping[__key])
-
-
-class SearchCache(SortedMapping[datetime, VOD_file]):
+class SearchCache(typing.Mapping[datetime, VOD_file], typing.Reversible[datetime]):
     "Search Cache"
 
-    _keys: list[date]
-    _items: dict[date, tuple[list[time], dict[time, VOD_file]]]
+    class OrderedDict(typing.Mapping[_KT_contra, _VT_co], typing.Reversible[_KT_contra]):
+        """"Ordered" dictionary"""
 
-    __slots__ = ("_status_keys", "_statuses", "at_start", "at_end")
+        __slots__ = ("_keys", "_items")
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._keys:list[_KT_contra] = []
+
+            self._items:dict[_KT_contra, _VT_co] = {}
+
+        def __iter__(self):
+            return self._keys.__iter__()
+
+        def __reversed__(self):
+            return self._keys.__reversed__()
+
+        def __getitem__(self, __key: _KT_contra):
+            return self._items.__getitem__(__key)
+
+        def __len__(self):
+            return self._items.__len__()
+
+        def __contains__(self, __key: object):
+            return self._items.__contains__(__key)
+
+        def astuple(self):
+            """as tuple"""
+            return self._keys, self._items
+
+        def __eq__(self, __value: object) -> bool:
+            if not isinstance(__value, SearchCache.OrderedDict):
+                return NotImplemented
+            return self._keys == __value._keys and self._items == __value._items
+
+
+    __slots__ = ("statuses", "files", "at_start", "at_end")
 
     def __init__(self):
-        super().__init__([], {})
+        super().__init__()
 
-        self._status_keys:list[yearmonth] = []
-        self._statuses:dict[yearmonth,VOD_search_status] = {}
+        self.statuses:SearchCache.OrderedDict[yearmonth,VOD_search_status] = type(self).OrderedDict()
+        self.files:SearchCache.OrderedDict[date,SearchCache.OrderedDict[time,VOD_file]] = type(self).OrderedDict()
         self.at_start: bool = False
         self.at_end: bool = False
 
-    def __getitem__(self, __key: datetime) -> VOD_file:
-        return self._items.get(__key.date())[1].get(__key.time())
+    @typing.overload
+    def __getitem__(self, __key: datetime) -> VOD_file:...
 
-    def __iter__(self) -> Iterator[datetime]:
-        for __date in self._keys:
-            for __time in self._items[__date][0]:
+    @typing.overload
+    def __getitem__(self, __key: _slice_class) -> typing.Iterable[VOD_file]:...
+
+    def __getitem__(self, __key: datetime|_slice_class):
+        if isinstance(__key, slice):
+            return self.slice(slice.start, slice.stop)
+        return self.files[__key.date()][__key.time()]
+
+    def __iter__(self):
+        for __date, files in self.files.items():
+            for __time in files.keys():
                 yield datetime.combine(__date, __time)
 
     def __len__(self) -> int:
-        return sum(map(lambda d: len(d[0]), self._items.values()))
+        return sum(map(len, self.files.values()))
 
-    def __reversed__(self) -> Iterator[datetime]:
-        for __date in reversed(self._keys):
-            for __time in reversed(self._items[__date][0]):
+    def __reversed__(self):
+        for __date in reversed(self.files):
+            for __time in reversed(self.files[__date]):
                 yield datetime.combine(__date, __time)
 
     def __contains__(self, __x: datetime):
-        if __files := self._items.get(__x.date()):
-            return __x.time() in __files[1]
-        return False
+        return (__files := self.files.get(__x.date())) and __x.time() in __files
+
+    def __eq__(self, __other: object):
+        if not isinstance(__other, SearchCache):
+            return NotImplemented
+        return __other.statuses == self.statuses and __other.files == self.files
 
     def _statuses_pop(self, __key: yearmonth):
-        if (status:= self._statuses.pop(__key, None)) is not None:
-            self._status_keys.remove(__key)
+        keys, statuses = self.statuses.astuple()
+        if (status:= statuses.pop(__key, None)) is not None:
+            keys.remove(__key)
         return status
 
+
     def _del_item(self, __key:date):
-        if not isinstance(__key, datetime):
-            if self._items.pop(__key, None) is None:
-                self._keys.remove(__key)
-            return
-        if not (items := self._items.get(__key.date())):
-            return
-        __time = __key.time()
-        keys, files = items
-        if files.pop(__time, None):
+        if isinstance(__key, datetime):
+            __time = __key.time()
+            __key = __key.date()
+            if not (items:=self.files.get(__key)):
+                return
+            keys, files = items.astuple()
+            if not files.pop(__time, None):
+                return
             keys.remove(__time)
+            if len(files) > 0:
+                return
+        keys, items = self.files.astuple()
+        if not items.pop(__key, None):
+            return
+        keys.remove(__key)
 
     def trim(self, __key: yearmonth | date):
         """trim from cache"""
@@ -302,65 +294,80 @@ class SearchCache(SortedMapping[datetime, VOD_file]):
 
         self._del_item(__key)
 
-    @property
-    def statuses(self):
-        """search statuses"""
-        return SortedMapping(self._status_keys, self._statuses)
+    @typing.overload
+    def slice(self, start: yearmonth|None, end: yearmonth|None)->typing.Iterable[VOD_file]:...
 
-    def slice(self, start: datetime, end: datetime):
+    @typing.overload
+    def slice(self, start: date|None, end: date|None)->typing.Iterable[VOD_file]:...
+
+    @typing.overload
+    def slice(self, start: datetime|None, end: datetime|None)->typing.Iterable[VOD_file]:...
+
+    def slice(self, start: date|yearmonth|None, end: date|yearmonth|None=None):
         """get a slice of cache"""
-        if len(self._status_keys) < 1:
+        if len(self.statuses) < 1 or (start is None and end is None):
             return
-        __ym = max(self._status_keys[0], yearmonth.fromdate(start))
-        end_ym = min(self._status_keys[-1], yearmonth.fromdate(end))
-        start_time = start.time()
-        end_time = end.time()
-        first = True
+
+        keys, _ = self.statuses.astuple()
+
+        __ym = max(keys[0], yearmonth.fromdate(start))
+        end_ym = min(keys[-1], yearmonth.fromdate(end))
+        start_time = start.time() if isinstance(start, datetime) else time.min
+        if not isinstance(start, date):
+            at_start = start == __ym
+            start = start.date()
+        else:
+            at_start = __ym.date() <= (start.date() if isinstance(start, datetime) else start)
+        end_time = end.time() if isinstance(end, datetime) else time.max
+        if not isinstance(end, date):
+            end = end.date(-1)
 
         while __ym <= end_ym:
-            status = self._statuses.get(__ym)
-            if status:
+            if (status:=self.statuses.get(__ym)):
                 for __date in status:
-                    if first:
-                        if __date.day < start.day:
-                            continue
-                        if __date.day > start.day:
-                            first = False
-                    if __ym == end_ym and __date.day > end.day:
+                    if at_start and __date.day < start.day:
+                        continue
+                    if at_start and __date.day > start.day:
+                        at_start = False
+                    elif __ym == end_ym and __date.day > end.day:
                         break
-                    files = self._items.get(__date)
+                    files = self.files.get(__date)
                     if not files:
                         continue
-                    keys, items = files
-                    for __time in keys:
-                        if first:
-                            if __time < start_time:
-                                continue
-                            if __time >= start_time:
-                                first = False
+                    for __time, __file in files.items():
+                        if at_start and __time < start_time:
+                            continue
                         if __ym == end_ym and __date.day == end.day and __time > end_time:
                             break
-                        yield items[__time]
+                        yield __file
 
-            first = False
+            at_start = False
             __ym += 1
 
     def append(self, __object: VOD_search_status | VOD_file):
         """append/update status or file"""
         if isinstance(__object, VOD_search_status):
+            keys, statuses = self.statuses.astuple()
             __key = yearmonth.fromstatus(__object)
-            if __status := self._statuses.get(__key):
+            if __status := statuses.get(__key):
                 if __status.days == __object.days:
                     return
                 # purge any days that fall off from last status
                 for day in set(__status.days).difference(set(__object.days)):
                     self._del_item(__key.date(day))
             else:
-                bisect.insort(self._status_keys, __key)
-            self._statuses[__key] = __object
+                bisect.insort(keys, __key)
+            statuses[__key] = __object
             return
 
-        keys, files = self._items.setdefault(__object.start_time.date(), ([], {}))
+        keys, items = self.files.astuple()
+        __date = __object.start_time.date()
+        if not (files := items.get(__date)):
+            __files = type(self).OrderedDict()
+            files = items.setdefault(__date, __files)
+            if files is __files:
+                bisect.insort(keys, __date)
+        keys, files = files.astuple()
         __time = __object.start_time.time().replace(tzinfo=None)
         if __time not in files:
             bisect.insort(keys, __time)
@@ -369,13 +376,12 @@ class SearchCache(SortedMapping[datetime, VOD_file]):
 
     def extend(
         self,
-        __files: Iterable[VOD_file],
-        __statuses: Iterable[VOD_search_status] = None,
+        *__iterable: typing.Iterable[VOD_file] | typing.Iterable[VOD_search_status],
     ):
         """add search results to cache"""
-        if __statuses:
-            for status in __statuses:
-                self.append(status)
 
-        for file in __files:
-            self.append(file)
+        for __iter in __iterable:
+            if not __iter:
+                continue
+            for __item in __iter:
+                self.append(__item)

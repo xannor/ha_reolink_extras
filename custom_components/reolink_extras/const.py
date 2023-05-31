@@ -7,3 +7,5 @@ NAME = "Reolink Extras"
 DOMAIN = "reolink_extras"
 VERSION = "0.0.1"
 # ATTRIBUTION = ""
+
+SOURCE_KEY = "media_source"

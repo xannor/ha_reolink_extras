@@ -24,11 +24,8 @@ from reolink_aio.typings import VOD_file, VOD_search_status
 
 from .const import DOMAIN
 
-from .helpers import async_forward_reolink_entries, async_get_reolink_data
-
-from .typings import SearchCache
-
-# from .helpers.search import async_get_search_cache, SearchCache
+from .helpers.reolink import async_forward_reolink_entries, async_get_reolink_data
+from .helpers.cache import async_get_cache
 
 
 @dataclass
@@ -53,19 +50,16 @@ async def async_setup_entry(
 ):
     """Set up the calendar platform."""
 
-    local_data: dict[str, any] = hass.data[DOMAIN].setdefault(entry.entry_id, {})
+    # local_data: dict[str, any] = hass.data[DOMAIN].setdefault(entry.entry_id, {})
 
     async def setup_entry(entry: ConfigEntry):
         reolink_data = async_get_reolink_data(hass, entry.entry_id)
 
         entities: list[ReolinkVODCalendar] = []
         for channel in reolink_data.host.api.stream_channels:
-            search_data: dict[int, SearchCache] = local_data.setdefault("VOD", {})
-            cache = search_data.setdefault(0, SearchCache())
-            # search = async_get_search_cache(hass, entry.entry_id, channel)
             entities.extend(
                 [
-                    ReolinkVODCalendar(reolink_data, channel, entity_description, cache)
+                    ReolinkVODCalendar(reolink_data, channel, entity_description)
                     for entity_description in CALENDARS
                     if entity_description.supported(reolink_data.host.api, channel)
                 ]
@@ -86,13 +80,11 @@ class ReolinkVODCalendar(ReolinkChannelCoordinatorEntity, CalendarEntity):
         reolink_data: ReolinkData,
         channel: int,
         entity_description: ReolinkCalendarEntityDescription,
-        cache: SearchCache,
     ) -> None:
+        self.entity_description = entity_description
         ReolinkChannelCoordinatorEntity.__init__(self, reolink_data, channel)
         CalendarEntity.__init__(self)
-        self.entity_description = entity_description
         self._last_event: CalendarEvent | None = None
-        self._cache = cache
 
         if self._host.api.model in DUAL_LENS_MODELS:
             self._attr_name = f"{self.entity_description.name} lens {self._channel}"
@@ -117,7 +109,8 @@ class ReolinkVODCalendar(ReolinkChannelCoordinatorEntity, CalendarEntity):
             end_date.astimezone(_tz),
             stream="main",
         )
-        self._cache.extend(files, statuses)
+        cache = async_get_cache(self.hass, self.coordinator.config_entry.entry_id, self._channel, True)
+        cache.extend(files, statuses)
         # if results sets are too large we will not get full ranges
         # we should, however, get what ranges can give results
         # so we will use that to do multiple queries
@@ -137,10 +130,10 @@ class ReolinkVODCalendar(ReolinkChannelCoordinatorEntity, CalendarEntity):
             missing.sort()
             start_date = dtc.datetime.combine(missing[0], dtc.time.min)
             end_date = dtc.datetime.combine(missing[-1], dtc.time.max)
-            (_, files) = await api.request_vod_files(
+            (statuses, files) = await api.request_vod_files(
                 self._channel, start_date, end_date, stream="main"
             )
-            self._cache.extend(files)
+            cache.extend(statuses, files)
             found.update(set((file.start_time.date() for file in files)))
             missing = list(possible - found)
 
@@ -151,18 +144,22 @@ class ReolinkVODCalendar(ReolinkChannelCoordinatorEntity, CalendarEntity):
         end_date: dtc.datetime,
     ) -> list[CalendarEvent]:
         # check cache
-        now = self._host.api.get_time()
+        now = self._host.api.time()
+        cache = async_get_cache(self.hass, self.coordinator.config_entry.entry_id, self._channel, True)
+        if now is None:
+            now = await self._host.api.async_get_time()
         if (
-            self._cache.at_start
-            and (__first := next(iter(self._cache.statuses))) > start_date
+            cache.at_start
+            and (__first := next(iter(cache), None)) and __first > start_date
         ):
             start_date = dtc.datetime.combine(
                 __first.date(), dtc.time.min, tzinfo=now.tzinfo
             )
         if end_date.date() >= now.date():
             end_date = dtc.datetime.combine(now.date(), dtc.time.max, tzinfo=now.tzinfo)
-        first = next(iter(self._cache), None)
-        last = next(reversed(self._cache), None)
+
+        first = next(iter(cache), None)
+        last = next(reversed(cache), None)
         if not first or not last or first.date() == last.date():
             await self._cache_events(start_date, end_date)
         else:
@@ -172,7 +169,7 @@ class ReolinkVODCalendar(ReolinkChannelCoordinatorEntity, CalendarEntity):
                 await self._cache_events(last, end_date)
 
         return [
-            _file_to_event(file) for file in self._cache.slice(start_date, end_date)
+            _file_to_event(file) for file in cache.slice(start_date, end_date)
         ]
 
     async def async_added_to_hass(self) -> None:
@@ -196,8 +193,11 @@ class ReolinkVODCalendar(ReolinkChannelCoordinatorEntity, CalendarEntity):
 
     async def _async_handle_event(self, event):  # pylint: disable=unused-argument
         """Handle incoming event for motion detection"""
-        now = dtc.datetime.now()  # await self._host.api.async_get_time()
-        start = next(iter(self._cache.statuses), None) if self._cache.at_start else None
+        now = self._host.api.time()
+        if now is None:
+            now = await self._host.api.async_get_time()
+        cache = async_get_cache(self.hass, self.coordinator.config_entry.entry_id, self._channel, True)
+        start = cache.statuses.keys[0] if cache.at_start else None
         # if we have a hard start we also want to see if any days dropped off of it (i.e. camera cleanup)
         low = (
             dtc.datetime.combine(start.date(), dtc.time.min)
@@ -209,7 +209,7 @@ class ReolinkVODCalendar(ReolinkChannelCoordinatorEntity, CalendarEntity):
             self._channel, low, now, True, "main"
         )
         # todo : trim any missing results if hard start exists
-        self._cache.extend([], statuses)
+        cache.extend([], statuses)
         while (_f := filter(lambda s: len(s.days) > 0, statuses)) and not any(_f):
             if now.month > 1:
                 now = now.replace(month=now.month - 1)
@@ -218,56 +218,43 @@ class ReolinkVODCalendar(ReolinkChannelCoordinatorEntity, CalendarEntity):
             (statuses, _) = await self._host.api.request_vod_files(
                 self._channel, now, now, True, "main"
             )
-            self._cache.extend([], statuses)
+            cache.extend([], statuses)
 
-        first = (
-            next(iter(self._cache.statuses[__first]), None)
-            if (
-                __first := next(
-                    filter(
-                        lambda ym: len(self._cache.statuses[ym].days) > 0,
-                        self._cache.statuses,
-                    ),
-                    None,
-                )
-            )
-            else None
-        )
-        last = (
-            next(reversed(self._cache.statuses[__last]), None)
-            if (
-                __last := next(
-                    filter(
-                        lambda ym: len(self._cache.statuses[ym].days) > 0,
-                        reversed(self._cache.statuses),
-                    ),
-                    None,
-                )
-            )
-            else None
-        )
+        for __ym in cache.statuses:
+            if (status:=cache.statuses[__ym]) and len(status) > 0:
+                first = status[0]
+                break
+        else:
+            first = None
+
+        for __ym in reversed(cache.statuses):
+            if(status:=cache.statuses[__ym]) and len(status) > 0:
+                last = status[-1]
+                break
+        else:
+            last = None
 
         if last is not None:
             if first is not None and first != last:
-                (_, files) = await self._host.api.request_vod_files(
+                (statuses, files) = await self._host.api.request_vod_files(
                     self._channel,
                     dtc.datetime.combine(first, dtc.time.min),
                     dtc.datetime.combine(first, dtc.time.max),
                     stream="main",
                 )
-                self._cache.trim(first)
-                self._cache.extend(files)
+                cache.trim(first)
+                cache.extend(statuses, files)
 
-            (_, files) = await self._host.api.request_vod_files(
+            (statuses, files) = await self._host.api.request_vod_files(
                 self._channel,
                 dtc.datetime.combine(last, dtc.time.min),
                 dtc.datetime.combine(last, dtc.time.max),
                 stream="main",
             )
-            self._cache.trim(last)
-            self._cache.extend(files)
-            if __last := next(reversed(self._cache), None):
-                self._last_event = _file_to_event(self._cache[__last])
+            cache.trim(last)
+            cache.extend(statuses, files)
+            if __last := next(reversed(cache), None):
+                self._last_event = _file_to_event(cache[__last])
 
         if event is not None:
             self.async_write_ha_state()

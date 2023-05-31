@@ -6,7 +6,7 @@ from typing import Optional
 from aiohttp import web
 from aiohttp.web_request import FileField
 
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant, callback, async_get_hass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.loader import async_get_integration
 
@@ -26,13 +26,14 @@ from homeassistant.components.reolink import ReolinkData
 from homeassistant.components.reolink.entity import ReolinkHostCoordinatorEntity, ReolinkChannelCoordinatorEntity
 from homeassistant.components.reolink.const import DOMAIN as REOLINK_DOMAIN
 
-from reolink_aio.typings import VOD_file
+from reolink_aio.typings import VOD_file, VOD_trigger
 
-from .helpers import async_get_reolink_data
+from .helpers.reolink import async_get_reolink_data
+from .helpers.cache import async_get_cache
 
 from .const import DOMAIN, LOGGER
 
-from .typings import SearchCache, yearmonth
+from .typings import yearmonth
 
 
 class IncompatibleMediaSource(MediaSourceError):
@@ -52,9 +53,11 @@ async def async_get_media_source(hass: HomeAssistant):
     # if REOLINK_DOMAIN not in hass.data:
     #     LOGGER.warning("No reolink devices have been setup.")
 
+    source = ReolinkMediaSource(hass, reolink.name)
     hass.http.register_view(ReolinkVODMediaView)
     # hass.http.register_view(ReolinkVODThumbnailMediaView)
-    return ReolinkMediaSource(hass, reolink.name)
+
+    return source
 
 
 class ReolinkMediaSource(MediaSource):
@@ -66,7 +69,16 @@ class ReolinkMediaSource(MediaSource):
         self.hass = hass
 
     async def async_resolve_media(self, item: MediaSourceItem) -> PlayMedia:
-        return await super().async_resolve_media(item)
+        device, channel, file = self.async_parse_identifier(item)
+        if not (isinstance(device, str) and isinstance(channel, int) and isinstance(file, str)):
+            raise Unresolvable("Invalid item.")
+
+        _device = self.hass.config_entries.async_get_entry(device)
+        if not _device or _device.disabled_by:
+            raise IncompatibleMediaSource
+        _channel = int(channel)
+
+        return PlayMedia(ReolinkVODMediaView.url.replace(":.*", "").format(entry_id=_device.entry_id,channel=_channel,filename=file), "video/mp4")
 
     async def async_browse_media(self, item: MediaSourceItem) -> BrowseMediaSource:
         try:
@@ -77,17 +89,25 @@ class ReolinkMediaSource(MediaSource):
         return await self._browse_media(device, channel, file)
 
     @callback
-    def async_parse_identifier(self, item: MediaSourceItem):
+    def async_parse_identifier(self, item: MediaSourceItem)->tuple[str|None,str|None,tuple[int, int|None, int|None]|str|None]:
         """Parse identifier."""
         if item.domain != DOMAIN:
             raise Unresolvable("Unknown domain.")
 
+        if not item.identifier:
+            return (None, None, None)
+
         ident = item.identifier
+        marker, _, ident = ident.partition("/")
+        if marker != "vod":
+            raise Unresolvable("Invalid identifier")
+
         device, _, ident = ident.partition("/")
         if ident:
             channel, _, file_name = ident.partition("/")
             if not channel.isdigit():
-                raise Unresolvable("invalid channel");
+                raise Unresolvable("invalid channel")
+            channel = int(channel)
             if file_name:
                 year, _, ident = file_name.partition("/")
                 month = None
@@ -113,6 +133,8 @@ class ReolinkMediaSource(MediaSource):
 
                     if year is not None:
                         file_name = (year, month, day)
+            else:
+                file_name = None
         else:
             channel = None
             file_name = None
@@ -122,26 +144,17 @@ class ReolinkMediaSource(MediaSource):
     @callback
     def async_create_media(self, entity: ReolinkHostCoordinatorEntity, vod: VOD_file):
         """Get MediaSource for VOD """
+        if not isinstance(entity, ReolinkHostCoordinatorEntity):
+            raise Unresolvable("Invalid entity")
+        if not isinstance(vod, VOD_file):
+            raise Unresolvable("Invalid vod")
 
+        #pylint: disable=protected-access
         channel = entity._channel if isinstance(entity, ReolinkChannelCoordinatorEntity) else 0
 
         media, *_ = self._create_media(entity.coordinator.config_entry, channel, vod)
         return media
 
-
-    def _get_cache(self, entry_id: str, channel: int, create = False):
-        domain_data: dict[str, any] = self.hass.data.get(DOMAIN)
-        local_data: dict[str, dict[int, SearchCache]] = domain_data.get(entry_id) if domain_data else None
-        if local_data is None:
-            return None
-
-        search_data = local_data.get("VOD")
-        if search_data is None and create:
-            search_data = local_data.setdefault("VOD", {})
-        cache = search_data.get(channel) if search_data else None
-        if cache is None and create:
-            cache = search_data.setdefault(channel, SearchCache())
-        return cache
 
     def _create_media(
         self,
@@ -151,7 +164,7 @@ class ReolinkMediaSource(MediaSource):
     ):
         title = f"{self.name} Playback"
         thumbnail = None
-        path = ""
+        path = "vod"
         data = None
         media_class = MediaClass.DIRECTORY
         media_type = MediaType.PLAYLIST
@@ -178,12 +191,14 @@ class ReolinkMediaSource(MediaSource):
                 if file is not None:
                     if isinstance(file, VOD_file):
                         path += f"/{file.file_name}"
-                        title += f" {file.triggers}"
+                        title = ",".join(map(lambda t: t.name.title(), (trig for trig in VOD_trigger if trig in file.triggers)))
+                        title = f"{file.start_time.time()} {file.end_time - file.start_time} {title}"
                         media_class = MediaClass.VIDEO
                         media_type = MediaType.VIDEO
                     elif isinstance(file, tuple):
-                        title = "/".join(filter(lambda i: i is not None, file))
-                        path += title
+                        title = "/".join(map(str,filter(lambda i: i is not None, file)))
+                        path += f"/{title}"
+                        file = None
                     else:
                         raise IncompatibleMediaSource
 
@@ -219,25 +234,25 @@ class ReolinkMediaSource(MediaSource):
         media.children = children
 
         if not device:
-            for device in self.hass.config_entries.async_entries(REOLINK_DOMAIN):
-                if device.disabled_by is not None:
+            for _device in self.hass.config_entries.async_entries(REOLINK_DOMAIN):
+                if _device.disabled_by is not None:
                     continue
-                children.append(await self._browse_media(device, None, None, depth=depth-1))
+                children.append(await self._browse_media(_device, None, None, depth=depth-1))
         else:
             data = async_get_reolink_data(self.hass, device.entry_id)
             if channel is None:
-                for channel in data.host.api.stream_channels:
-                    children.append(await self._browse_media(device, channel, None, depth=depth-1))
+                for _channel in data.host.api.stream_channels:
+                    children.append(await self._browse_media(device, _channel, None, depth=depth-1))
             elif file is not None and not isinstance(file, tuple):
                 raise IncompatibleMediaSource
             else:
-                cache = self._get_cache(device.entry_id, channel, True)
+                cache = async_get_cache(self.hass, device.entry_id, channel, True)
                 year, month, day = file if file is not None else (None, None, None)
 
                 if year is None or month is None:
                     today = date.today()
                     if not cache.at_start:
-                        start = cache.statuses.keys()[0] if len(cache.statuses) > 0 else yearmonth.fromdate(today) + 1
+                        start = next(iter(cache.statuses)) if len(cache.statuses) > 0 else yearmonth.fromdate(today) + 1
                         while not cache.at_start:
                             start -= 1
                             try:
@@ -251,7 +266,7 @@ class ReolinkMediaSource(MediaSource):
                                 break
                             cache.extend([], statuses)
                     if not cache.at_end:
-                        end = cache.statuses.keys()[-1] - 1
+                        end = next(reversed(cache.statuses)) - 1
                         while not cache.at_end:
                             end += 1
                             if end > yearmonth.fromdate(today):
@@ -264,22 +279,41 @@ class ReolinkMediaSource(MediaSource):
                                 cache.at_end = True
                                 break
 
-                            if len(statuses) -- 0:
+                            if len(statuses) == 0:
                                 cache.at_end = True
                                 break
                             cache.extend([], statuses)
-
+                    if year is None:
+                        for start in cache.statuses:
+                            if year is not None and year >= start.year:
+                                continue
+                            year = start.year
+                            children.append(await self._browse_media(device, channel, (year, None, None), depth=depth-1))
+                    else:
+                        for start in cache.statuses:
+                            if year > start.year:
+                                continue
+                            if year < start.year:
+                                break
+                            children.append(await self._browse_media(device, channel, (year, start.month, None), depth=depth-1))
                 else:
-                    start = yearmonth(year, month)
+                    status = cache.statuses.get(yearmonth(year, month))
+                    if status is None:
+                        raise IncompatibleMediaSource
+                    if day is None:
+                        for day in status.days:
+                            children.append(await self._browse_media(device, channel, (year, month, day), depth=depth-1))
+                    else:
+                        if day not in status.days:
+                            raise IncompatibleMediaSource
+                        start = date(year, month, day)
+                        end = datetime.combine(start, time.max)
+                        start = datetime.combine(start, time.min)
+                        for _file in cache.slice(start, end):
+                            children.append(await self._browse_media(device, channel, _file, depth=depth-1))
 
-
-
-
-
-
-
-        if len(children) == 1:
-            return children[0]
+        # if len(children) == 1:
+        #     return children[0]
         return media
 
 
@@ -291,12 +325,41 @@ class ReolinkVODMediaView(http.HomeAssistantView):
     Returns vod files on camera/device.
     """
 
-    url = "/reolink_extras/vod/{entity_id}/{filename:.*}"
+    url = "/reolink_extras/vod/{entry_id}/{channel}/{filename:.*}"
     name = "reolink_extras:vod"
 
     async def get(
-        self, request: web.Request, entity_id: str, filename: str
+        self, request: web.Request, entry_id: str, channel: str, filename: str
     ) -> web.StreamResponse:
         """Start a GET request."""
 
-        raise web.HTTPNotFound()
+        if not channel.isdigit():
+            raise web.HTTPNotAcceptable()
+        channel = int(channel)
+
+        reolink_data = async_get_reolink_data(async_get_hass(), entry_id)
+        if reolink_data is None:
+            raise web.HTTPNotFound()
+
+        if channel not in reolink_data.host.api.stream_channels:
+            raise web.HTTPNotFound()
+
+        vod = await reolink_data.host.api.download_vod(filename)
+
+        response = web.StreamResponse()
+        if vod.etag:
+            response.etag = vod.etag.replace('"', '')
+        response.content_length = vod.length
+        await response.prepare(request)
+
+        try:
+            async for data in vod.stream.iter_any():
+                if request.transport.is_closing():
+                    break
+                await response.write(data)
+                # if data:
+                #     await response.drain()
+        except Exception as e:
+            raise e
+        await response.write_eof()
+        return response

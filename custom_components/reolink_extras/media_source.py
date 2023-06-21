@@ -4,7 +4,9 @@ from datetime import date, datetime, time
 from typing import Optional
 
 from aiohttp import web
-from aiohttp.web_request import FileField
+from aiohttp.abc import AbstractStreamWriter
+from aiohttp.typedefs import LooseHeaders
+from aiohttp.web_request import BaseRequest
 
 from homeassistant.core import HomeAssistant, callback, async_get_hass
 from homeassistant.config_entries import ConfigEntry
@@ -26,7 +28,8 @@ from homeassistant.components.reolink import ReolinkData
 from homeassistant.components.reolink.entity import ReolinkHostCoordinatorEntity, ReolinkChannelCoordinatorEntity
 from homeassistant.components.reolink.const import DOMAIN as REOLINK_DOMAIN
 
-from reolink_aio.typings import VOD_file, VOD_trigger
+from reolink_aio.typings import VOD_file, VOD_trigger, VOD_download
+from reolink_aio.exceptions import InvalidContentTypeError
 
 from .helpers.reolink import async_get_reolink_data
 from .helpers.cache import async_get_cache
@@ -309,12 +312,58 @@ class ReolinkMediaSource(MediaSource):
                         start = date(year, month, day)
                         end = datetime.combine(start, time.max)
                         start = datetime.combine(start, time.min)
-                        for _file in cache.slice(start, end):
-                            children.append(await self._browse_media(device, channel, _file, depth=depth-1))
+                        retry = True
+                        while(retry):
+                            retry = False
+                            for _file in cache.slice(start, end):
+                                children.append(await self._browse_media(device, channel, _file, depth=depth-1))
+                            if len(children) == 0:
+                                statuses, files = await data.host.api.request_vod_files(channel, start, end, False, "main")
+                                cache.extend(statuses, files)
+                                if len(files) > 0:
+                                    retry = True
 
         # if len(children) == 1:
         #     return children[0]
         return media
+
+
+class VODResponse(web.StreamResponse):
+
+    def __init__(self, vod:VOD_download, status: int = 200, reason: str | None = None, headers: LooseHeaders | None = None) -> None:
+        super().__init__(status=status, reason=reason, headers=headers)
+        self._vod = vod
+
+    async def _send_vod(self, request: web.BaseRequest):
+        writer = await super().prepare(request)
+        assert writer is not None
+
+        transport = request.transport
+        assert transport is not None
+
+        vod = self._vod
+        async for chunk in vod.stream.iter_any():
+            if transport.is_closing():
+                LOGGER.debug("Client closed stream, aborting download")
+                break
+            await writer.write(chunk)
+
+        LOGGER.debug("Closing VOD")
+        vod.close()
+        await writer.drain()
+        return writer
+
+    async def prepare(self, request: BaseRequest):
+        LOGGER.debug("Preparing VOD for download (%s)", self._vod.filename)
+        vod = self._vod
+        if vod.etag:
+            self.etag = vod.etag.replace('"', '')
+        self.content_length = vod.length
+
+        writer = await self._send_vod(request)
+        await writer.write_eof()
+        return writer
+
 
 
 
@@ -337,29 +386,17 @@ class ReolinkVODMediaView(http.HomeAssistantView):
             raise web.HTTPNotAcceptable()
         channel = int(channel)
 
-        reolink_data = async_get_reolink_data(async_get_hass(), entry_id)
+        hass = async_get_hass()
+        reolink_data = async_get_reolink_data(hass, entry_id)
         if reolink_data is None:
             raise web.HTTPNotFound()
 
         if channel not in reolink_data.host.api.stream_channels:
             raise web.HTTPNotFound()
 
-        vod = await reolink_data.host.api.download_vod(filename)
-
-        response = web.StreamResponse()
-        if vod.etag:
-            response.etag = vod.etag.replace('"', '')
-        response.content_length = vod.length
-        await response.prepare(request)
-
         try:
-            async for data in vod.stream.iter_any():
-                if request.transport.is_closing():
-                    break
-                await response.write(data)
-                # if data:
-                #     await response.drain()
-        except Exception as e:
-            raise e
-        await response.write_eof()
-        return response
+            vod = await reolink_data.host.api.download_vod(filename)
+        except InvalidContentTypeError as exc:
+            raise web.HTTPServerError(reason="Cannot download multiple files at once.") from exc
+
+        return VODResponse(vod)

@@ -20,7 +20,7 @@ from homeassistant.util import dt
 
 from reolink_aio.api import DUAL_LENS_MODELS
 from reolink_aio.api import Host
-from reolink_aio.typings import VOD_file, VOD_search_status
+from reolink_aio.typings import VOD_file, VOD_search_status, VOD_trigger
 
 from .const import DOMAIN
 
@@ -160,6 +160,7 @@ class ReolinkVODCalendar(ReolinkChannelCoordinatorEntity, CalendarEntity):
 
         first = next(iter(cache), None)
         last = next(reversed(cache), None)
+
         if not first or not last or first.date() == last.date():
             await self._cache_events(start_date, end_date)
         else:
@@ -197,7 +198,8 @@ class ReolinkVODCalendar(ReolinkChannelCoordinatorEntity, CalendarEntity):
         if now is None:
             now = await self._host.api.async_get_time()
         cache = async_get_cache(self.hass, self.coordinator.config_entry.entry_id, self._channel, True)
-        start = cache.statuses.keys[0] if cache.at_start else None
+        t = cache.keys()
+        start = next(iter(cache.statuses)) if cache.at_start else None
         # if we have a hard start we also want to see if any days dropped off of it (i.e. camera cleanup)
         low = (
             dtc.datetime.combine(start.date(), dtc.time.min)
@@ -261,8 +263,10 @@ class ReolinkVODCalendar(ReolinkChannelCoordinatorEntity, CalendarEntity):
 
 
 def _file_to_event(file: VOD_file, name: str = None):
+    title = ",".join(map(lambda t: t.name.title(), (trig for trig in VOD_trigger if trig != VOD_trigger.NONE and trig in file.triggers)))
+
     return CalendarEvent(
-        dt.as_utc(file.start_time),
-        dt.as_utc(file.end_time),
-        f"{name or ''} {file.triggers} event",
+        dt.as_local(file.start_time),
+        dt.as_local(file.end_time),
+        f"{name or ''} {title} event",
     )

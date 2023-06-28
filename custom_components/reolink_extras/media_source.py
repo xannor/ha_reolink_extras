@@ -194,7 +194,7 @@ class ReolinkMediaSource(MediaSource):
                 if file is not None:
                     if isinstance(file, VOD_file):
                         path += f"/{file.file_name}"
-                        title = ",".join(map(lambda t: t.name.title(), (trig for trig in VOD_trigger if trig in file.triggers)))
+                        title = ",".join(map(lambda t: t.name.title(), (trig for trig in VOD_trigger if trig != VOD_trigger.NONE and trig in file.triggers)))
                         title = f"{file.start_time.time()} {file.end_time - file.start_time} {title}"
                         media_class = MediaClass.VIDEO
                         media_type = MediaType.VIDEO

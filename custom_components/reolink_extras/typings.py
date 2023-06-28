@@ -184,6 +184,34 @@ class SearchCache(typing.Mapping[datetime, VOD_file], typing.Reversible[datetime
     class OrderedDict(typing.Mapping[_KT_contra, _VT_co], typing.Reversible[_KT_contra]):
         """"Ordered" dictionary"""
 
+        class OrderedKeysView(typing.KeysView[_KT_contra], typing.Reversible[_KT_contra]):
+            """"Ordered" keys"""
+
+            _mapping: "SearchCache.OrderedDict[_KT_contra, _VT_co]"
+
+            def __reversed__(self) -> typing.Iterator[_KT_contra]:
+                return self._mapping.__reversed__()
+
+        class OrderedValuesView(typing.ValuesView[_VT_co], typing.Reversible[_VT_co]):
+            """"Ordered" values"""
+
+            _mapping: "SearchCache.OrderedDict[_KT_contra, _VT_co]"
+
+            def __reversed__(self) -> typing.Iterator[_VT_co]:
+                for key in reversed(self._mapping):
+                    yield self._mapping[key]
+
+
+        class OrderedItemsView(typing.ItemsView[_KT_contra, _VT_co], typing.Reversible[tuple[_KT_contra, _VT_co]]):
+            """"Ordered" items"""
+
+            _mapping: "SearchCache.OrderedDict[_KT_contra, _VT_co]"
+
+            def __reversed__(self) -> typing.Iterator[tuple[_KT_contra, _VT_co]]:
+                for key in reversed(self._mapping):
+                    yield (key, self._mapping[key])
+
+
         __slots__ = ("_keys", "_items")
 
         def __init__(self) -> None:
@@ -206,6 +234,15 @@ class SearchCache(typing.Mapping[datetime, VOD_file], typing.Reversible[datetime
 
         def __contains__(self, __key: object):
             return self._items.__contains__(__key)
+
+        def keys(self)->typing.KeysView[_KT_contra]:
+            return self.OrderedKeysView(self)
+
+        def values(self)->typing.ValuesView[_VT_co]:
+            return self.OrderedValuesView(self)
+
+        def items(self)->typing.ItemsView[_KT_contra, _VT_co]:
+            return self.OrderedItemsView(self)
 
         def astuple(self):
             """as tuple"""
@@ -240,16 +277,16 @@ class SearchCache(typing.Mapping[datetime, VOD_file], typing.Reversible[datetime
 
     def __iter__(self):
         for __date, files in self.files.items():
-            for __time in files.keys():
-                yield datetime.combine(__date, __time)
+            for __time, __file in files.items():
+                yield datetime.combine(__date, __time, tzinfo=__file.tzinfo)
 
     def __len__(self) -> int:
         return sum(map(len, self.files.values()))
 
     def __reversed__(self):
-        for __date in reversed(self.files):
-            for __time in reversed(self.files[__date]):
-                yield datetime.combine(__date, __time)
+        for __date, files in reversed(self.files.items()):
+            for __time, __file in reversed(files.items()):
+                yield datetime.combine(__date, __time, tzinfo=__file.tzinfo)
 
     def __contains__(self, __x: datetime):
         return (__files := self.files.get(__x.date())) and __x.time() in __files

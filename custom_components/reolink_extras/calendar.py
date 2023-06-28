@@ -20,13 +20,10 @@ from homeassistant.util import dt
 
 from reolink_aio.api import DUAL_LENS_MODELS
 from reolink_aio.api import Host
-from reolink_aio.typings import VOD_file, VOD_search_status, VOD_trigger
-
-from .const import DOMAIN
+from reolink_aio.typings import VOD_file, VOD_trigger
 
 from .helpers.reolink import async_forward_reolink_entries, async_get_reolink_data
 from .helpers.cache import async_get_cache
-
 
 @dataclass
 class ReolinkCalendarEntityDescriptionMixin:
@@ -170,7 +167,7 @@ class ReolinkVODCalendar(ReolinkChannelCoordinatorEntity, CalendarEntity):
                 await self._cache_events(last, end_date)
 
         return [
-            _file_to_event(file) for file in cache.slice(start_date, end_date)
+            self._file_to_event(file) for file in cache.slice(start_date, end_date)
         ]
 
     async def async_added_to_hass(self) -> None:
@@ -256,17 +253,17 @@ class ReolinkVODCalendar(ReolinkChannelCoordinatorEntity, CalendarEntity):
             cache.trim(last)
             cache.extend(statuses, files)
             if __last := next(reversed(cache), None):
-                self._last_event = _file_to_event(cache[__last])
+                self._last_event = self._file_to_event(cache[__last])
 
         if event is not None:
             self.async_write_ha_state()
 
 
-def _file_to_event(file: VOD_file, name: str = None):
-    title = ",".join(map(lambda t: t.name.title(), (trig for trig in VOD_trigger if trig != VOD_trigger.NONE and trig in file.triggers)))
+    def _file_to_event(self, file: VOD_file, name: str = None):
+        title = ",".join(map(lambda t: t.name.title(), (trig for trig in VOD_trigger if trig != VOD_trigger.NONE and trig in file.triggers)))
 
-    return CalendarEvent(
-        dt.as_local(file.start_time),
-        dt.as_local(file.end_time),
-        f"{name or ''} {title} event",
-    )
+        return CalendarEvent(
+            dt.as_local(file.start_time),
+            dt.as_local(file.end_time),
+            f"{name or ''} {title} event",
+        )

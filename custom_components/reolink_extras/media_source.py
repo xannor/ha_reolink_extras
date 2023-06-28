@@ -1,10 +1,8 @@
 """ Media Source Platform """
 
 from datetime import date, datetime, time
-from typing import Optional
 
 from aiohttp import web
-from aiohttp.abc import AbstractStreamWriter
 from aiohttp.typedefs import LooseHeaders
 from aiohttp.web_request import BaseRequest
 
@@ -27,6 +25,8 @@ from homeassistant.components.media_source.models import (
 from homeassistant.components.reolink import ReolinkData
 from homeassistant.components.reolink.entity import ReolinkHostCoordinatorEntity, ReolinkChannelCoordinatorEntity
 from homeassistant.components.reolink.const import DOMAIN as REOLINK_DOMAIN
+
+from homeassistant.helpers.singleton import singleton
 
 from reolink_aio.typings import VOD_file, VOD_trigger, VOD_download
 from reolink_aio.exceptions import InvalidContentTypeError
@@ -329,6 +329,7 @@ class ReolinkMediaSource(MediaSource):
 
 
 class VODResponse(web.StreamResponse):
+    """Stream repeater similar to web.FileResponse"""
 
     def __init__(self, vod:VOD_download, status: int = 200, reason: str | None = None, headers: LooseHeaders | None = None) -> None:
         super().__init__(status=status, reason=reason, headers=headers)
